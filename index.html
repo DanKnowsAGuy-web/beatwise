@@ -132,11 +132,12 @@ function firstPlan(activity){
   if(activity==='med') return {zone:3, hold:15, rounds:4};
   return {zone:4, hold:15, rounds:5};
 }
+function driftOf(x){ const r=x.rounds; return r&&r.length>=2 ? r[r.length-1].recover/Math.max(r[0].recover,1) : 1; }
+function goodSession(x){ return x.completed && x.rpe!=='hard' && driftOf(x)<=1.4; }
 function evaluateSession(sess){
   if(sess.capped && !sess.completed) return ['same','Your heart needed longer recoveries last time, which is useful information, not a failure. We repeat this level today.'];
   if(!sess.completed) return ['down','Last time you stopped early, so today is one notch easier.'];
-  const r=sess.rounds;
-  const drift = r.length>=2 ? r[r.length-1].recover / Math.max(r[0].recover,1) : 1;
+  const drift = driftOf(sess);
   if(sess.rpe==='hard') return ['same','You rated the last session very hard, so we repeat this level until it feels manageable.'];
   if(drift>1.4) return ['same','Your recovery slowed a lot by the final round last time, so we repeat this level.'];
   return ['up','You finished the last session strong, so today steps up.'];
@@ -144,15 +145,15 @@ function evaluateSession(sess){
 function stepPlan(p, dir){
   const q={zone:p.zone, hold:p.hold, rounds:p.rounds};
   if(dir==='up'){
-    if(q.rounds<6) q.rounds++;
-    else if(q.hold<30){ q.hold=HOLD_STEPS[HOLD_STEPS.indexOf(q.hold)+1]; q.rounds=4; }
-    else if(q.zone<5){ q.zone++; q.hold=15; q.rounds=4; }
-    else if(q.rounds<8) q.rounds++;
+    if(q.zone>=5){ q.rounds=Math.min(8,q.rounds+1); }
+    else if(q.hold<30){ q.hold=HOLD_STEPS[HOLD_STEPS.indexOf(q.hold)+1]; }
+    else { q.zone++; q.hold=15; }
   } else if(dir==='down'){
-    if(q.rounds>3) q.rounds--;
-    else if(q.hold>15){ q.hold=HOLD_STEPS[HOLD_STEPS.indexOf(q.hold)-1]; q.rounds=5; }
-    else if(q.zone>3){ q.zone--; q.hold=30; q.rounds=5; }
+    if(q.hold>15){ q.hold=HOLD_STEPS[HOLD_STEPS.indexOf(q.hold)-1]; }
+    else if(q.zone>3){ q.zone--; q.hold=30; }
+    else if(q.rounds>3){ q.rounds--; }
   }
+  if(q.zone>=5) q.hold=15; /* research supports Zone 5 only as short surges */
   return q;
 }
 function planText(p){ return 'Zone '+p.zone+' &middot; '+p.hold+'-second holds &middot; '+p.rounds+' rounds'; }
@@ -331,9 +332,23 @@ function submitRPE(v){
   const isFirst = S.sessions.length===0;
   S.sessions.push(sess); S.lastSummary=sess; S.pendingSession=null;
   const [dir,reason]=evaluateSession(sess);
-  S.plan = dir==='same' ? {zone:sess.plan.zone,hold:sess.plan.hold,rounds:sess.plan.rounds}
-                        : stepPlan(sess.plan, dir);
-  S.planReason=reason;
+  if(dir==='up'){
+    const cand=stepPlan(sess.plan,'up');
+    if(cand.zone>sess.plan.zone){
+      const prev=S.sessions[S.sessions.length-2];
+      if(prev && goodSession(prev)){
+        S.plan=cand;
+        S.planReason='Two strong sessions in a row, so today you step up to Zone '+cand.zone+'. Reaching it takes noticeably harder work.';
+      } else {
+        S.plan={zone:sess.plan.zone,hold:sess.plan.hold,rounds:sess.plan.rounds};
+        S.planReason='Strong session! One more strong one at this level unlocks Zone '+cand.zone+'.';
+      }
+    } else { S.plan=cand; S.planReason=reason; }
+  } else {
+    S.plan = dir==='same' ? {zone:sess.plan.zone,hold:sess.plan.hold,rounds:sess.plan.rounds}
+                          : stepPlan(sess.plan, dir);
+    S.planReason=reason;
+  }
   persist();
   S.screen = isFirst ? 'findings' : 'summary';
   render();
@@ -351,6 +366,7 @@ function updateLive(){
   const remaining = S.phase==='hold' ? Math.max(0,S.plan.hold-S.phaseTime)
                   : S.phase==='rest' ? Math.max(0,S.plan.hold*2-S.phaseTime) : S.phaseTime;
   el('bigTimer').textContent = fmt(gated? S.phaseTime : remaining);
+  if(S.phase==='push' && S.phaseTime>90 && el('tip')) el('tip').textContent='Struggling to get there? Make the work harder: more resistance, a faster pace, or a hill.';
   el('sessClock') && (el('sessClock').textContent=fmt((Date.now()-S.sessionStart)/1000)+' of '+sessionLimit()+' min');
   el('hrNum') && (el('hrNum').textContent=Math.round(S.hr));
   el('hrSlider') && (el('hrSlider').value=Math.round(S.hr));
@@ -471,8 +487,8 @@ window.wAct=v=>{
   obNext();
 };
 window.finishOnboarding=()=>{S.onboarded=true; persist(); go('setup');};
-window.setZone=v=>{S.plan.zone=v; persist(); render();};
-window.setHold=v=>{S.plan.hold=v; persist(); render();};
+window.setZone=v=>{S.plan.zone=v; if(v===5)S.plan.hold=15; persist(); render();};
+window.setHold=v=>{S.plan.hold=(S.plan.zone===5?15:v); persist(); render();};
 window.setRounds=v=>{S.plan.rounds=v; persist(); render();};
 window.setMode=v=>{S.inputMode=v; render();};
 window.toggleOverride=()=>{S.overrideMax=!S.overrideMax; render();};
@@ -550,6 +566,7 @@ function wizardHTML(){
       <div style="text-align:center"><div class="num" style="font-size:44px;font-weight:700;color:var(--rest)">${recoverCeil()}</div><div class="note" style="margin:0">recovered</div></div>
     </div>
     <div style="font-size:19px;margin-bottom:10px">Each round works like this: push until your heart reaches <b style="color:var(--push)">${gateFloor()}</b>, hold that effort ${S.plan.hold} seconds, then slow down until your heart settles to <b style="color:var(--rest)">${recoverCeil()}</b>, and rest easy. The app watches your heart and tells you when.</div>
+    <div style="font-size:18px;margin-bottom:10px"><b>Good ways to do this:</b> a stationary bike, brisk uphill walking, or an elliptical. Anything where you can quickly make the work harder or easier.</div>
     <div class="note" style="margin-bottom:14px">Heart medicines such as beta blockers lower these numbers. If you take one, or have a heart condition and do not exercise regularly, talk with your doctor before starting. You can change any answer later under &ldquo;My details&rdquo;.</div>
     <button class="big-btn" onclick="finishOnboarding()">Show me my first workout</button>
     ${back}
@@ -618,7 +635,7 @@ function setupHTML(){
     ${S.showAdjust?`
       <div style="display:grid;gap:14px;margin-top:10px">
         <div><div class="lbl">Zone to reach</div>${segHTML([3,4,5], S.plan.zone, 'setZone', ['Zone 3','Zone 4','Zone 5'])}</div>
-        <div><div class="lbl">Hold time</div>${segHTML([15,20,30], S.plan.hold, 'setHold', ['15 sec','20 sec','30 sec'])}</div>
+        <div><div class="lbl">Hold time</div>${segHTML([15,20,30], S.plan.hold, 'setHold', ['15 sec','20 sec','30 sec'])}${S.plan.zone===5?'<div class="note">At Zone 5, holds stay at 15 seconds. That high, research supports only short surges.</div>':''}</div>
         <div><div class="lbl">Rounds</div>${segHTML([3,4,5,6,8], S.plan.rounds, 'setRounds')}</div>
       </div>`:''}
   </div>
