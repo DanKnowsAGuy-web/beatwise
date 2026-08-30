@@ -95,7 +95,7 @@ const S = {
   obStep:0, onboarded:false,
   name:'', age:68, sex:'female', restHR:64, activity:null,
   overrideMax:false, manualMax:170, observedMax:0,
-  plan:null, planReason:'', showAdjust:false, showDetails:false,
+  plan:null, planReason:'', showAdjust:false, showDetails:false, modality:'bike',
   inputMode:'manual',
   hr:74, phase:'push', round:1, phaseStart:0, phaseTime:0, peak:0, sessionStart:0, timeCapped:false,
   rounds:[], completed:false, sessions:[], btStatus:'', lastSummary:null, pendingSession:null,
@@ -217,14 +217,14 @@ function loadAll(){
   S.sessions.forEach(x=>{ if(x.roundsDone==null && x.rounds) x.roundsDone=x.rounds.length; });
   const prof = load('pg-profile',null);
   if(prof){ Object.assign(S,{name:prof.name||'', age:prof.age, sex:prof.sex, restHR:prof.restHR, activity:prof.activity,
-    overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0});
+    overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0, modality:prof.modality||'bike'});
     S.onboarded = !!(prof.onboarded || (prof.name && prof.activity)); }
   const pl = load('pg-plan',null);
   if(pl){ S.plan=pl.plan; S.planReason=pl.reason||''; }
 }
 function persist(){
   store('pg-sessions',S.sessions);
-  store('pg-profile',{name:S.name,onboarded:S.onboarded,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
+  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
     overrideMax:S.overrideMax,manualMax:S.manualMax,observedMax:S.observedMax});
   if(S.plan) store('pg-plan',{plan:S.plan,reason:S.planReason});
 }
@@ -321,7 +321,7 @@ function endWorkout(){
     date:new Date().toISOString(), maxHR:maxHR(), restHR:S.restHR,
     gate:gateFloor(), ceil:recoverCeil(),
     plan:{zone:S.plan.zone,hold:S.plan.hold,rounds:S.plan.rounds},
-    completed:S.completed, capped:S.timeCapped, rounds:done, roundsDone:done.length, peak:Math.round(S.peak),
+    modality:S.modality, completed:S.completed, capped:S.timeCapped, rounds:done, roundsDone:done.length, peak:Math.round(S.peak),
     avgPush:+avgPush.toFixed(1), avgRecover:+avgRec.toFixed(1),
     fitness:+(avgPush/avgRec).toFixed(3),
   };
@@ -366,7 +366,12 @@ function updateLive(){
   const remaining = S.phase==='hold' ? Math.max(0,S.plan.hold-S.phaseTime)
                   : S.phase==='rest' ? Math.max(0,S.plan.hold*2-S.phaseTime) : S.phaseTime;
   el('bigTimer').textContent = fmt(gated? S.phaseTime : remaining);
-  if(S.phase==='push' && S.phaseTime>90 && el('tip')) el('tip').textContent='Struggling to get there? Make the work harder: more resistance, a faster pace, or a hill.';
+  if(S.phase==='push' && S.phaseTime>90 && el('tip')){
+    const cues={bike:'Not rising? Add resistance, pedal faster, or stand on the pedals.',
+                walk:'Not rising? Steepen the hill, speed up, and pump your arms.',
+                row:'Not rising? Drive harder with your legs and quicken your strokes.'};
+    el('tip').textContent=cues[S.modality]||cues.bike;
+  }
   el('sessClock') && (el('sessClock').textContent=fmt((Date.now()-S.sessionStart)/1000)+' of '+sessionLimit()+' min');
   el('hrNum') && (el('hrNum').textContent=Math.round(S.hr));
   el('hrSlider') && (el('hrSlider').value=Math.round(S.hr));
@@ -491,6 +496,7 @@ window.setZone=v=>{S.plan.zone=v; if(v===5)S.plan.hold=15; persist(); render();}
 window.setHold=v=>{S.plan.hold=(S.plan.zone===5?15:v); persist(); render();};
 window.setRounds=v=>{S.plan.rounds=v; persist(); render();};
 window.setMode=v=>{S.inputMode=v; render();};
+window.setModality=v=>{S.modality=v; persist(); render();};
 window.toggleOverride=()=>{S.overrideMax=!S.overrideMax; render();};
 window.setManualMax=v=>{S.manualMax=+v; refreshEst();};
 window.toggleAdjust=()=>{S.showAdjust=!S.showAdjust; render();};
@@ -566,7 +572,7 @@ function wizardHTML(){
       <div style="text-align:center"><div class="num" style="font-size:44px;font-weight:700;color:var(--rest)">${recoverCeil()}</div><div class="note" style="margin:0">recovered</div></div>
     </div>
     <div style="font-size:19px;margin-bottom:10px">Each round works like this: push until your heart reaches <b style="color:var(--push)">${gateFloor()}</b>, hold that effort ${S.plan.hold} seconds, then slow down until your heart settles to <b style="color:var(--rest)">${recoverCeil()}</b>, and rest easy. The app watches your heart and tells you when.</div>
-    <div style="font-size:18px;margin-bottom:10px"><b>Good ways to do this:</b> a stationary bike, brisk uphill walking, or an elliptical. Anything where you can quickly make the work harder or easier.</div>
+    <div style="font-size:18px;margin-bottom:10px"><b>Good ways to do this:</b> a stationary bike, brisk uphill walking, or a rowing machine. Anything where you can quickly make the work harder or easier.</div>
     <div class="note" style="margin-bottom:14px">Heart medicines such as beta blockers lower these numbers. If you take one, or have a heart condition and do not exercise regularly, talk with your doctor before starting. You can change any answer later under &ldquo;My details&rdquo;.</div>
     <button class="big-btn" onclick="finishOnboarding()">Show me my first workout</button>
     ${back}
@@ -638,6 +644,11 @@ function setupHTML(){
         <div><div class="lbl">Hold time</div>${segHTML([15,20,30], S.plan.hold, 'setHold', ['15 sec','20 sec','30 sec'])}${S.plan.zone===5?'<div class="note">At Zone 5, holds stay at 15 seconds. That high, research supports only short surges.</div>':''}</div>
         <div><div class="lbl">Rounds</div>${segHTML([3,4,5,6,8], S.plan.rounds, 'setRounds')}</div>
       </div>`:''}
+  </div>
+
+  <div class="panel">
+    <div class="lbl">Today&rsquo;s exercise</div>
+    ${segHTML(['bike','walk','row'], S.modality, 'setModality', ['Bike','Uphill walk','Rowing'])}
   </div>
 
   <div class="panel">
