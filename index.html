@@ -494,12 +494,19 @@ function paintPhase(){
     S.phase==='hold' ? 'Hold this effort' :
     S.phase==='recover' ? 'Slow down until your heart drops to '+recoverCeil() : 'Easy movement';
   el('tip').textContent=m.tip;
-  const rb=document.getElementById('reachedBtn'), mp=document.getElementById('manualPanel');
-  if(rb&&mp){
+  const rb=document.getElementById('reachedBtn'), mp=document.getElementById('manualPanel'), ub=document.getElementById('undoBtn');
+  if(rb&&mp&&ub){
     const gatePhase = S.phase==='push'||S.phase==='recover';
-    mp.style.display = gatePhase?'block':'none';
-    rb.textContent = S.phase==='push' ? 'I reached '+gateFloor() : 'I am down to '+recoverCeil();
-    rb.style.background = S.phase==='push' ? 'var(--pushBg)' : 'var(--restBg)';
+    mp.style.display='block';                       /* panel stays put so undo is always reachable */
+    rb.style.display = gatePhase?'block':'none';
+    ub.style.display = gatePhase?'none':'block';    /* undo shows exactly when a tap just happened */
+    if(gatePhase){
+      rb.textContent = S.phase==='push' ? 'I reached '+gateFloor() : 'I am down to '+recoverCeil();
+      rb.style.background = S.phase==='push' ? 'var(--pushBg)' : 'var(--restBg)';
+    } else {
+      ub.textContent = S.phase==='hold' ? '\u21BA Undo, I have not reached '+gateFloor()+' yet'
+                                        : '\u21BA Undo, I am not down to '+recoverCeil()+' yet';
+    }
   }
   const bp=document.getElementById('breathPanel');
   if(bp){ bp.style.display = S.phase==='recover' ? 'block':'none'; if(S.phase==='recover') paintBreath(); }
@@ -852,7 +859,7 @@ function workoutHTML(){
   ${S.inputMode==='manual'?`
   <div class="panel" id="manualPanel">
     <button class="big-btn" id="reachedBtn" style="min-height:96px;font-size:26px" onclick="manualReached()"></button>
-    <button class="link-btn" style="margin-top:8px" onclick="manualUndo()">Tapped by mistake? Go back</button>
+    <button class="ghost-btn" id="undoBtn" style="margin-top:10px;display:none;font-weight:700" onclick="manualUndo()">&#8630; Undo, I tapped too soon</button>
   </div>`:''}
   ${S.inputMode==='bluetooth'?`
   <div class="panel" style="text-align:center">
