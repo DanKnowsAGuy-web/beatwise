@@ -476,7 +476,6 @@ function updateLive(){
   }
   el('sessClock') && (el('sessClock').textContent=fmt((Date.now()-S.sessionStart)/1000)+' of '+sessionLimit()+' min');
   el('hrNum') && (el('hrNum').textContent=Math.round(S.hr));
-  el('hrSlider') && (el('hrSlider').value=Math.round(S.hr));
   el('ladder') && (el('ladder').innerHTML=ladderSVG());
 }
 function paintPhase(){
@@ -850,14 +849,14 @@ function workoutHTML(){
       <div class="note" id="tip"></div>
     </div>
   </div>
-  ${S.inputMode!=='demo'?`
-  <div class="panel">
-    <div class="lbl">Your heart rate now: <span class="num" id="hrNum" style="font-size:28px">${Math.round(S.hr)}</span></div>
-    <div style="display:flex;align-items:center;gap:12px">
-      <button class="stepBtn" onclick="nudgeHR(-5)" aria-label="Lower heart rate by 5">&minus;</button>
-      <input type="range" id="hrSlider" min="50" max="${maxHR()+12}" value="${Math.round(S.hr)}" oninput="S.hr=+this.value;updateLive()" style="flex:1" aria-label="Current heart rate">
-      <button class="stepBtn" onclick="nudgeHR(5)" aria-label="Raise heart rate by 5">+</button>
-    </div>
+  ${S.inputMode==='manual'?`
+  <div class="panel" id="manualPanel">
+    <button class="big-btn" id="reachedBtn" style="min-height:96px;font-size:26px" onclick="manualReached()"></button>
+    <button class="link-btn" style="margin-top:8px" onclick="manualUndo()">Tapped by mistake? Go back</button>
+  </div>`:''}
+  ${S.inputMode==='bluetooth'?`
+  <div class="panel" style="text-align:center">
+    <div class="lbl" style="margin:0">Heart rate now: <span class="num" id="hrNum" style="font-size:40px">${Math.round(S.hr)}</span></div>
   </div>`:''}
   <div class="panel" id="breathPanel" style="display:none">
     <div id="breathBox"></div>
