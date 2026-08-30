@@ -759,6 +759,16 @@ function summaryHTML(){
   </div>`;
 }
 
+function modalityStats(){
+  const names={bike:'Bike',walk:'Uphill walk',row:'Rowing'};
+  const g={};
+  S.sessions.forEach(x=>{ if(x.modality) (g[x.modality]=g[x.modality]||[]).push(x); });
+  const rows=Object.entries(g).filter(([m,a])=>a.length>=2).map(([m,a])=>({
+    m, label:names[m]||m, n:a.length,
+    push:+(a.reduce((s,x)=>s+x.avgPush,0)/a.length).toFixed(0),
+    rec:+(a.reduce((s,x)=>s+x.avgRecover,0)/a.length).toFixed(0)}));
+  return rows.length>=2 ? rows : null;
+}
 function pct(a,b,lowerBetter){
   if(a==null||b==null||a===0) return null;
   const p=Math.round(((b-a)/a)*100);
@@ -832,6 +842,17 @@ function dashHTML(){
     </div>`;
   }
 
+  /* by exercise */
+  const ms=modalityStats();
+  if(ms){
+    const rises=[...ms].sort((a,b)=>a.push-b.push)[0];
+    const settles=[...ms].sort((a,b)=>a.rec-b.rec)[0];
+    s+=`<div class="panel">
+      <div style="font-size:22px;font-weight:700;margin-bottom:8px">By exercise</div>
+      ${ms.map(r=>'<div class="sumRow">'+r.label+': <b style="color:var(--push)">'+r.push+'s</b> to rise &middot; <b style="color:var(--rest)">'+r.rec+'s</b> to settle <span class="note" style="margin:0">('+r.n+' sessions)</span></div>').join('')}
+      <div style="font-size:18px;margin-top:10px">Your heart rises quickest on the <b>${rises.label.toLowerCase()}</b>${rises.m===settles.m?' and settles fastest there too.':' and settles fastest after the <b>'+settles.label.toLowerCase()+'</b>.'}</div>
+    </div>`;
+  }
   /* details */
   s+=`<button class="link-btn" onclick="toggleDetails()">${S.showDetails?'Hide the detailed charts':'See the detailed charts'}</button>`;
   if(S.showDetails){
