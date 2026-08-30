@@ -97,7 +97,7 @@ const S = {
   overrideMax:false, manualMax:170, observedMax:0,
   plan:null, planReason:'', showAdjust:false, showDetails:false,
   inputMode:'manual',
-  hr:74, phase:'push', round:1, phaseStart:0, phaseTime:0, peak:0,
+  hr:74, phase:'push', round:1, phaseStart:0, phaseTime:0, peak:0, sessionStart:0, timeCapped:false,
   rounds:[], completed:false, sessions:[], btStatus:'', lastSummary:null, pendingSession:null,
 };
 const PHASE = {
@@ -133,6 +133,7 @@ function firstPlan(activity){
   return {zone:4, hold:15, rounds:5};
 }
 function evaluateSession(sess){
+  if(sess.capped && !sess.completed) return ['same','Your heart needed longer recoveries last time, which is useful information, not a failure. We repeat this level today.'];
   if(!sess.completed) return ['down','Last time you stopped early, so today is one notch easier.'];
   const r=sess.rounds;
   const drift = r.length>=2 ? r[r.length-1].recover / Math.max(r[0].recover,1) : 1;
@@ -155,6 +156,17 @@ function stepPlan(p, dir){
   return q;
 }
 function planText(p){ return 'Zone '+p.zone+' &middot; '+p.hold+'-second holds &middot; '+p.rounds+' rounds'; }
+/* Session time limit in minutes. Starts low, earned upward, hard cap 15.
+   Base: activity level. Docked for age 75+ and elevated resting HR (fitness marker).
+   Earned: +1 minute per 3 completed sessions not rated very hard. */
+function sessionLimit(){
+  let base = S.activity==='high'?12 : S.activity==='med'?10 : 8;
+  if(S.age>=75) base-=1;
+  if(S.restHR>=75) base-=1;
+  base=Math.max(8,base);
+  const good=S.sessions.filter(x=>x.completed && x.rpe!=='hard').length;
+  return Math.min(15, base + Math.floor(good/3));
+}
 
 /* ================= insight math ================= */
 /* Estimated heart rate recovery in the first minute (HRR1 proxy):
@@ -259,7 +271,7 @@ function advance(to){
 function startWorkout(){
   persist();
   S.rounds=[]; S.round=1; S.phase='push'; S.phaseStart=Date.now(); S.phaseTime=0;
-  S.peak=0; S.completed=false;
+  S.peak=0; S.completed=false; S.sessionStart=Date.now(); S.timeCapped=false;
   if(S.inputMode==='demo') S.hr=74;
   S.screen='workout'; beep(880); render();
   clearInterval(tickId); tickId=setInterval(tick,150);
@@ -275,6 +287,9 @@ function simTick(){
 }
 function tick(){
   if(S.screen!=='workout') return;
+  if((Date.now()-S.sessionStart)/1000 >= sessionLimit()*60){
+    S.timeCapped=true; endWorkout(); return;
+  }
   S.phaseTime = (Date.now()-S.phaseStart)/1000;
   if(S.inputMode==='bluetooth') S.peak=Math.max(S.peak, S.hr);
   const h=S.hr, p=S.phase;
@@ -304,7 +319,7 @@ function endWorkout(){
     date:new Date().toISOString(), maxHR:maxHR(), restHR:S.restHR,
     gate:gateFloor(), ceil:recoverCeil(),
     plan:{zone:S.plan.zone,hold:S.plan.hold,rounds:S.plan.rounds},
-    completed:S.completed, rounds:done, peak:Math.round(S.peak),
+    completed:S.completed, capped:S.timeCapped, rounds:done, peak:Math.round(S.peak),
     avgPush:+avgPush.toFixed(1), avgRecover:+avgRec.toFixed(1),
     fitness:+(avgPush/avgRec).toFixed(3),
   };
@@ -335,6 +350,7 @@ function updateLive(){
   const remaining = S.phase==='hold' ? Math.max(0,S.plan.hold-S.phaseTime)
                   : S.phase==='rest' ? Math.max(0,S.plan.hold*2-S.phaseTime) : S.phaseTime;
   el('bigTimer').textContent = fmt(gated? S.phaseTime : remaining);
+  el('sessClock') && (el('sessClock').textContent=fmt((Date.now()-S.sessionStart)/1000)+' of '+sessionLimit()+' min');
   el('hrNum') && (el('hrNum').textContent=Math.round(S.hr));
   el('hrSlider') && (el('hrSlider').value=Math.round(S.hr));
   el('ladder') && (el('ladder').innerHTML=ladderSVG());
@@ -595,6 +611,7 @@ function setupHTML(){
     <div style="font-weight:700;font-size:20px;margin-bottom:6px">${firstTime?'Your first workout':'Today&rsquo;s workout'}</div>
     <div class="num" style="font-size:30px;font-weight:700">${planText(S.plan)}</div>
     <div class="note" style="font-size:17px">${S.planReason}</div>
+    <div class="note">Session limit: <b>${sessionLimit()} minutes</b>. Finish more sessions and it grows, up to 15.</div>
     <div class="note">How it works: work hard until your heart reaches <b style="color:var(--push)">${gateFloor()}</b>, hold for ${S.plan.hold} seconds, then slow down until it settles to <b style="color:var(--rest)">${recoverCeil()}</b> and rest ${S.plan.hold*2} seconds. That is one round.</div>
     <button class="link-btn" onclick="toggleAdjust()">${S.showAdjust?'Hide adjustments':'Change today&rsquo;s plan myself'}</button>
     ${S.showAdjust?`
@@ -628,7 +645,7 @@ function workoutHTML(){
   return `
   <div id="phaseBanner" style="background:${m.hex}">
     <div class="num" id="phaseLabel" style="font-size:30px;font-weight:700;letter-spacing:.05em">${m.label}</div>
-    <div id="roundLabel" style="font-size:18px;font-weight:700">Round ${S.round} of ${S.plan.rounds}</div>
+    <div style="text-align:right"><div id="roundLabel" style="font-size:18px;font-weight:700">Round ${S.round} of ${S.plan.rounds}</div><div id="sessClock" style="font-size:15px"></div></div>
   </div>
   <div class="panel workRow">
     <svg id="ladder" width="76" height="240" style="overflow:visible" aria-label="Heart rate zone ladder">${ladderSVG()}</svg>
@@ -694,7 +711,8 @@ function findingsHTML(){
 function summaryHTML(){
   const s=S.lastSummary;
   return `
-  <h1 class="screen">${s.completed?'Nice work'+(S.name?', '+S.name:''):'Workout saved'}</h1>
+  <h1 class="screen">${s.completed?'Nice work'+(S.name?', '+S.name:''):s.capped?'Time is up, well done':'Workout saved'}</h1>
+  ${s.capped?'<div class="panel2" style="margin-bottom:14px;font-size:18px">Your heart needed longer recoveries today, so the session ended at its time limit. That is your body talking, and the app listened.</div>':''}
   <div class="grid3" style="margin:16px 0">
     <div class="stat"><div class="num" style="font-size:34px;font-weight:700;color:var(--push)">${s.avgPush}s</div><div class="note" style="margin-top:4px">to reach the zone</div><div class="note" style="font-size:14px">longer = fitter</div></div>
     <div class="stat"><div class="num" style="font-size:34px;font-weight:700;color:var(--rest)">${s.avgRecover}s</div><div class="note" style="margin-top:4px">to recover</div><div class="note" style="font-size:14px">shorter = fitter</div></div>
