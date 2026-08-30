@@ -100,6 +100,7 @@ const S = {
   hr:74, phase:'push', round:1, phaseStart:0, phaseTime:0, peak:0, sessionStart:0, timeCapped:false,
   paused:false, pausedAt:0, voiceOn:true, lastCeilingWarn:0, breathLevel:1, breathTaught:false,
   rounds:[], completed:false, sessions:[], btStatus:'', lastSummary:null, pendingSession:null,
+  cps:[], cpPhase:'intro', cpStart:0, cpSeconds:0, cpResult:null,
 };
 const PHASE = {
   push:   {label:'PUSH',    hex:'#C0392B', tip:'Work as hard as you comfortably can'},
@@ -209,12 +210,48 @@ function goalSentence(){
     : 'Your aim: make your heart harder to speed up. Try to add a second or two to your climb time.';
 }
 
+/* ================= control pause (breath score) ================= */
+function lastCP(){ return S.cps.length? S.cps[S.cps.length-1] : null; }
+function cpDue(){
+  const l=lastCP();
+  return !l || (Date.now()-new Date(l.date).getTime()) > 7*24*3600*1000;
+}
+function cpSuggest(sec){ return sec>=30?3 : sec>=20?2 : sec>=10?1 : 0; }
+function cpBand(sec){
+  return sec>=40?'Excellent' : sec>=30?'Very good' : sec>=20?'Good' : sec>=10?'Building' : 'A normal starting point';
+}
+let cpTimers=[], cpInt=null;
+function cpClear(){ cpTimers.forEach(clearTimeout); cpTimers=[]; clearInterval(cpInt); cpInt=null; try{speechSynthesis.cancel();}catch(e){} }
+window.startCPTest=()=>{ S.cpPhase='intro'; S.cpResult=null; go('cptest'); };
+window.beginCP=()=>{
+  S.cpPhase='guide'; render();
+  say('Sit comfortably and relax your shoulders.');
+  cpTimers.push(setTimeout(()=>{ say('Take a small, normal breath in through your nose.'); },3500));
+  cpTimers.push(setTimeout(()=>{ say('And a small, normal breath out through your nose.'); },7500));
+  cpTimers.push(setTimeout(()=>{ say('Now gently pinch your nose and hold. Tap the button at the first definite urge to breathe.'); },11500));
+  cpTimers.push(setTimeout(()=>{
+    S.cpPhase='hold'; S.cpStart=Date.now(); render();
+    cpInt=setInterval(()=>{ const el=document.getElementById('cpTimer'); if(el) el.textContent=Math.floor((Date.now()-S.cpStart)/1000)+'s'; },200);
+  },14500));
+};
+window.cpUrge=()=>{
+  const sec=Math.round((Date.now()-S.cpStart)/1000);
+  cpClear();
+  S.cpSeconds=sec; S.cpPhase='result';
+  S.cps.push({date:new Date().toISOString(), seconds:sec});
+  S.breathLevel=cpSuggest(sec);
+  persist();
+  say('Your breath score is '+sec+' seconds. '+cpBand(sec)+'.');
+  render();
+};
+
 /* ================= persistence ================= */
 let mem={};
 function store(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){ mem[k]=v; } }
 function load(k,d){ try{ const v=localStorage.getItem(k); return v!=null? JSON.parse(v):d; }catch(e){ return (k in mem)? mem[k]:d; } }
 function loadAll(){
   S.sessions = load('pg-sessions',[]);
+  S.cps = load('pg-cp',[]);
   S.sessions.forEach(x=>{ if(x.roundsDone==null && x.rounds) x.roundsDone=x.rounds.length; });
   const prof = load('pg-profile',null);
   if(prof){ Object.assign(S,{name:prof.name||'', age:prof.age, sex:prof.sex, restHR:prof.restHR, activity:prof.activity,
@@ -226,6 +263,7 @@ function loadAll(){
 }
 function persist(){
   store('pg-sessions',S.sessions);
+  store('pg-cp',S.cps);
   store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
     overrideMax:S.overrideMax,manualMax:S.manualMax,observedMax:S.observedMax});
   if(S.plan) store('pg-plan',{plan:S.plan,reason:S.planReason});
@@ -417,6 +455,7 @@ function submitRPE(v){
 }
 function go(sc){
   if(S.screen==='workout'){ clearInterval(tickId); clearInterval(simId); releaseWake(); try{speechSynthesis.cancel();}catch(e){} }
+  if(S.screen==='cptest') cpClear();
   S.screen=sc; render();
 }
 
@@ -495,8 +534,8 @@ function ringSVG(done, goal){
     +'<text x="80" y="100" text-anchor="middle" font-size="15" fill="var(--dim)">this week</text>'
     +'</svg>';
 }
-function trendSVG(keys, colors, height){
-  const data=S.sessions, W=460, H=height, P=32;
+function trendSVG(keys, colors, height, dataset){
+  const data=dataset||S.sessions, W=460, H=height, P=32;
   if(data.length===0) return '';
   let vals=[]; keys.forEach(k=>data.forEach(d=>vals.push(d[k])));
   const lo=Math.min(...vals)*0.9, hi=(Math.max(...vals)*1.1)||1;
@@ -693,6 +732,13 @@ function setupHTML(){
   if(!S.plan){ S.plan=firstPlan(S.activity||'med'); S.planReason='Your starting plan.'; persist(); }
   if(!firstTime){
     s += `<div class="panel2" style="margin-bottom:16px;font-size:18px">${goalSentence()}</div>`;
+    if(cpDue()){
+      s += `<div class="panel" style="display:flex;align-items:center;gap:12px">
+        <div style="flex:1"><div style="font-weight:700;font-size:19px">Weekly breath check</div>
+        <div class="note">One minute, before you warm up. Your score sets this week&rsquo;s breathing level.</div></div>
+        <button class="ghost-btn" style="width:auto;padding:12px 18px;font-weight:700;color:var(--recover)" onclick="startCPTest()">Take it</button>
+      </div>`;
+    }
   }
 
   s+=`
@@ -765,6 +811,7 @@ function workoutHTML(){
     ${!S.breathTaught||S.sessions.length===0?`<div style="font-size:17px;margin-bottom:10px">Start with <b>two quick sniffs in the nose, one long sigh out the mouth</b>, three times. Then climb this ladder as far as today allows. Gasping? Open your mouth for the exhale and step back down. The mouth is the release valve, never a failure.</div>`:''}
     ${segHTML([0,1,2,3], S.breathLevel, 'setBreath', ['0','1','2','3'])}
     <div class="note">0: sniffs in, sigh out the mouth &middot; 1: nose in, slow blow out the lips &middot; 2: nose in and out &middot; 3: mouth closed the whole time</div>
+    ${lastCP()?`<div class="note" style="color:var(--recover);font-weight:700">Your breath score of ${lastCP().seconds}s suggests level ${cpSuggest(lastCP().seconds)}.</div>`:''}
   </div>
   <div class="panel2" style="margin-bottom:16px;display:${S.rounds.length?'block':'none'}">
     <div class="lbl">Finished rounds</div>
@@ -775,6 +822,45 @@ function workoutHTML(){
     <button class="ghost-btn" style="flex:1" onclick="toggleVoice()">${S.voiceOn?'&#128266; Voice on':'&#128263; Voice off'}</button>
   </div>
   <button class="ghost-btn" onclick="endWorkout()">Stop here and save</button>`;
+}
+
+function cptestHTML(){
+  if(S.cpPhase==='result'){
+    const sec=S.cpSeconds;
+    return `
+    <h1 class="screen">Your breath score</h1>
+    <div class="hero">
+      <div class="heroNum" style="color:${sec>=20?'var(--rest)':'var(--recover)'}">${sec}</div>
+      <div style="font-size:22px;font-weight:700">seconds &middot; ${cpBand(sec)}</div>
+      <div style="font-size:18px;margin-top:10px">For your workouts, this suggests recovery breathing <b>level ${cpSuggest(sec)}</b>. Most people gain 2 to 4 seconds a week with practice.</div>
+    </div>
+    <button class="big-btn" onclick="go('setup')">Done</button>
+    <button class="link-btn" style="margin-top:10px" onclick="go('dash')">See my score history</button>`;
+  }
+  if(S.cpPhase==='hold'){
+    return `
+    <h1 class="screen">Hold...</h1>
+    <div class="hero">
+      <div class="heroNum" id="cpTimer" style="color:var(--recover)">0s</div>
+      <div style="font-size:19px;margin-top:8px">Nose gently pinched. Relaxed. This is not a contest.</div>
+    </div>
+    <button class="big-btn" style="background:var(--recoverBg);min-height:96px;font-size:28px" onclick="cpUrge()">First urge to breathe</button>
+    <div class="note" style="text-align:center;margin-top:10px">A swallow or a small twitch in your middle counts. Stop right away if you feel lightheaded.</div>`;
+  }
+  if(S.cpPhase==='guide'){
+    return `
+    <h1 class="screen">Follow my voice</h1>
+    <div class="hero"><div style="font-size:22px">Small breath in through the nose... small breath out... then pinch and hold.</div></div>`;
+  }
+  return `
+  <h1 class="screen">Breath score check</h1>
+  <div class="panel" style="font-size:18px">
+    <div style="margin-bottom:10px">This one-minute test measures how calm your breathing system is. A higher score means easier nose breathing and faster recoveries.</div>
+    <div style="margin-bottom:10px"><b>How it works:</b> a small normal breath in through your nose, a small breath out, then gently pinch your nose and hold. Tap the button at the <b>first definite urge</b> to breathe, a swallow or a little twitch. It is not a breath-holding contest.</div>
+    <div class="note">Best done seated and rested, before a workout, not after. Stop immediately if you feel dizzy or unwell. Skip this test if your doctor has told you to avoid breath holds.</div>
+  </div>
+  <button class="big-btn" onclick="beginCP()">Begin</button>
+  <button class="link-btn" style="margin-top:10px" onclick="go('setup')">Not today</button>`;
 }
 
 function rpeHTML(){
@@ -918,6 +1004,19 @@ function dashHTML(){
     </div>`;
   }
 
+  /* breath score */
+  const cp=lastCP();
+  if(cp){
+    s+=`<div class="panel">
+      <div style="display:flex;align-items:baseline;gap:14px">
+        <div class="num" style="font-size:52px;font-weight:700;color:var(--recover)">${cp.seconds}s</div>
+        <div><div style="font-size:20px;font-weight:700">Breath score &middot; ${cpBand(cp.seconds)}</div>
+        <div class="note" style="margin:0">Calm CO2 tolerance. Rises 2 to 4 seconds a week with practice.</div></div>
+      </div>
+      ${S.cps.length>=2? trendSVG(['seconds'], ['#155E8F'], 150, S.cps) : ''}
+      <button class="link-btn" onclick="startCPTest()">Test again</button>
+    </div>`;
+  }
   /* by exercise */
   const ms=modalityStats();
   if(ms){
@@ -961,6 +1060,7 @@ function render(){
               : route==='setup'? setupHTML()
               : route==='settings'? settingsHTML()
               : route==='workout'? workoutHTML()
+              : route==='cptest'? cptestHTML()
               : route==='rpe'? rpeHTML()
               : route==='findings'? findingsHTML()
               : route==='summary'? summaryHTML()
