@@ -119,7 +119,7 @@ function estMax(){
 function maxHR(){ return S.overrideMax ? Math.max(S.manualMax, S.observedMax||0) : estMax(); }
 function bands(){ return [0.5,0.6,0.7,0.8,0.9,1.0].map(p=>Math.round(S.restHR + p*(maxHR()-S.restHR))); }
 function gateFloor(){ return bands()[S.plan.zone-1]; }
-function recoverCeil(){ return bands()[1]; }
+function recoverCeil(){ return bands()[0]; } /* bottom of Zone 1: a truly settled heart */
 function fmt(s){ const m=Math.floor(s/60), r=Math.floor(s%60); return m>0? m+':'+String(r).padStart(2,'0') : r+'s'; }
 function greeting(){
   const h=new Date().getHours();
@@ -276,7 +276,7 @@ function simTick(){
 function tick(){
   if(S.screen!=='workout') return;
   S.phaseTime = (Date.now()-S.phaseStart)/1000;
-  if(S.inputMode!=='demo') S.peak=Math.max(S.peak, S.hr);
+  if(S.inputMode==='bluetooth') S.peak=Math.max(S.peak, S.hr);
   const h=S.hr, p=S.phase;
   if(p==='push' && h>=gateFloor()){
     curRound={round:S.round, push:+S.phaseTime.toFixed(1)};
@@ -297,7 +297,7 @@ function endWorkout(){
   clearInterval(tickId); clearInterval(simId);
   const done=S.rounds.filter(r=>r.recover!=null);
   if(done.length===0){ go('setup'); return; }
-  if(S.inputMode!=='demo' && S.peak>maxHR()){ S.observedMax=Math.round(S.peak); }
+  if(S.inputMode==='bluetooth' && S.peak>maxHR()){ S.observedMax=Math.round(S.peak); }
   const avgPush=done.reduce((a,r)=>a+r.push,0)/done.length;
   const avgRec=done.reduce((a,r)=>a+r.recover,0)/done.length;
   S.pendingSession={
@@ -462,6 +462,7 @@ window.toggleOverride=()=>{S.overrideMax=!S.overrideMax; render();};
 window.setManualMax=v=>{S.manualMax=+v; refreshEst();};
 window.toggleAdjust=()=>{S.showAdjust=!S.showAdjust; render();};
 window.toggleDetails=()=>{S.showDetails=!S.showDetails; render();};
+window.clearCal=()=>{S.observedMax=0; persist(); render();};
 function refreshEst(){
   const el=id=>document.getElementById(id);
   el('ageOut')&&(el('ageOut').textContent='Age: '+S.age);
@@ -568,7 +569,7 @@ function profilePanel(){
         <div><span class="num" id="recOut" style="font-size:32px;font-weight:700;color:var(--rest)">${recoverCeil()}</span> <span class="note" style="margin:0">recovered</span></div>
       </div>
       <div class="note">Heart medicines such as beta blockers lower these numbers. If you take one, or if you have a heart condition and do not exercise regularly, talk with your doctor before starting.</div>
-      ${S.observedMax?'<div class="note" style="color:var(--recover);font-weight:700">Your zones were adjusted upward because you reached '+S.observedMax+' in a session.</div>':''}
+      ${S.observedMax?'<div class="note" style="color:var(--recover);font-weight:700">Your zones were adjusted upward because a session recorded '+S.observedMax+'. <button class="link-btn" onclick="clearCal()">Undo this adjustment</button></div>':''}
     </div>
     <div>
       <button class="link-btn" onclick="toggleOverride()">${S.overrideMax?'Use the estimate instead':'I know my true maximum heart rate'}</button>
