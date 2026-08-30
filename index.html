@@ -98,6 +98,7 @@ const S = {
   plan:null, planReason:'', showAdjust:false, showDetails:false, modality:'bike',
   inputMode:'manual',
   hr:74, phase:'push', round:1, phaseStart:0, phaseTime:0, peak:0, sessionStart:0, timeCapped:false,
+  paused:false, pausedAt:0, voiceOn:true, lastCeilingWarn:0,
   rounds:[], completed:false, sessions:[], btStatus:'', lastSummary:null, pendingSession:null,
 };
 const PHASE = {
@@ -230,6 +231,26 @@ function persist(){
 }
 loadAll();
 
+/* ================= wake lock (keep the screen on during workouts) ================= */
+let wakeLock=null;
+async function keepAwake(){
+  try{ wakeLock = await navigator.wakeLock.request('screen'); }catch(e){}
+}
+function releaseWake(){ try{ wakeLock && wakeLock.release(); wakeLock=null; }catch(e){} }
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && S.screen==='workout') keepAwake(); });
+
+/* ================= voice coaching ================= */
+function say(text){
+  if(!S.voiceOn) return;
+  try{
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text);
+    u.rate=0.95; u.volume=1;
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+window.toggleVoice=()=>{ S.voiceOn=!S.voiceOn; if(!S.voiceOn) try{speechSynthesis.cancel();}catch(e){} render(); };
+
 /* ================= audio ================= */
 let actx=null;
 function beep(f=880,d=0.18){
@@ -268,6 +289,12 @@ let tickId=null, simId=null, curRound={};
 function advance(to){
   beep(to==='hold'?1200 : to==='rest'?500 : 880);
   S.phase=to; S.phaseStart=Date.now(); S.phaseTime=0;
+  const lines={
+    push:'Push. Work hard until your heart reaches '+gateFloor()+'.',
+    hold:'Hold this effort for '+S.plan.hold+' seconds.',
+    recover:'Well done. Slow right down and let your heart settle to '+recoverCeil()+'.',
+    rest:'Rest easy. Next round soon.'};
+  say(lines[to]);
   paintPhase();
 }
 function startWorkout(){
@@ -275,26 +302,45 @@ function startWorkout(){
   S.rounds=[]; S.round=1; S.phase='push'; S.phaseStart=Date.now(); S.phaseTime=0;
   S.peak=0; S.completed=false; S.sessionStart=Date.now(); S.timeCapped=false;
   if(S.inputMode==='demo') S.hr=74;
-  S.screen='workout'; beep(880); render();
+  S.paused=false;
+  S.screen='workout'; beep(880); keepAwake();
+  say('Round 1. Push until your heart reaches '+gateFloor()+'.');
+  render();
   clearInterval(tickId); tickId=setInterval(tick,150);
   clearInterval(simId);
   if(S.inputMode==='demo') simId=setInterval(simTick,200);
 }
 function simTick(){
+  if(S.paused) return;
   const hard = S.phase==='push'||S.phase==='hold';
   const target = hard ? maxHR()*0.93 : maxHR()*0.52;
   const rate = hard ? 0.035 : 0.045;
   S.hr = Math.max(55, Math.min(maxHR()+3, S.hr + (target-S.hr)*rate + (Math.random()-0.5)*1.2));
   updateLive();
 }
+window.togglePause=()=>{
+  if(S.paused){
+    const gap=Date.now()-S.pausedAt;
+    S.phaseStart+=gap; S.sessionStart+=gap;   /* clocks resume where they left off */
+    S.paused=false; say('Resuming.');
+  } else {
+    S.paused=true; S.pausedAt=Date.now(); say('Paused.');
+  }
+  render();
+};
 function tick(){
-  if(S.screen!=='workout') return;
+  if(S.screen!=='workout' || S.paused) return;
   if((Date.now()-S.sessionStart)/1000 >= sessionLimit()*60){
     S.timeCapped=true; endWorkout(); return;
   }
   S.phaseTime = (Date.now()-S.phaseStart)/1000;
   if(S.inputMode==='bluetooth') S.peak=Math.max(S.peak, S.hr);
   const h=S.hr, p=S.phase;
+  if(h>=maxHR()+5 && Date.now()-S.lastCeilingWarn>20000){
+    S.lastCeilingWarn=Date.now();
+    beep(300,0.5); say('Ease off now. Your heart rate is very high. Slow down.');
+    const w=document.getElementById('ceilWarn'); if(w){ w.style.display='block'; setTimeout(()=>{w.style.display='none';},15000); }
+  }
   if(p==='push' && h>=gateFloor()){
     curRound={round:S.round, push:+S.phaseTime.toFixed(1)};
     advance('hold');
@@ -311,7 +357,8 @@ function tick(){
   updateLive();
 }
 function endWorkout(){
-  clearInterval(tickId); clearInterval(simId);
+  clearInterval(tickId); clearInterval(simId); releaseWake();
+  try{speechSynthesis.cancel();}catch(e){}
   const done=S.rounds.filter(r=>r.recover!=null);
   if(done.length===0){ go('setup'); return; }
   if(S.inputMode==='bluetooth' && S.peak>maxHR()){ S.observedMax=Math.round(S.peak); }
@@ -354,7 +401,7 @@ function submitRPE(v){
   render();
 }
 function go(sc){
-  if(S.screen==='workout'){ clearInterval(tickId); clearInterval(simId); }
+  if(S.screen==='workout'){ clearInterval(tickId); clearInterval(simId); releaseWake(); try{speechSynthesis.cancel();}catch(e){} }
   S.screen=sc; render();
 }
 
@@ -365,7 +412,8 @@ function updateLive(){
   const gated = S.phase==='push'||S.phase==='recover';
   const remaining = S.phase==='hold' ? Math.max(0,S.plan.hold-S.phaseTime)
                   : S.phase==='rest' ? Math.max(0,S.plan.hold*2-S.phaseTime) : S.phaseTime;
-  el('bigTimer').textContent = fmt(gated? S.phaseTime : remaining);
+  el('bigTimer').textContent = S.paused? 'Paused' : fmt(gated? S.phaseTime : remaining);
+  if(S.paused){ el('bigTimer').style.fontSize='54px'; } else { el('bigTimer').style.fontSize='96px'; }
   if(S.phase==='push' && S.phaseTime>90 && el('tip')){
     const cues={bike:'Not rising? Add resistance, pedal faster, or stand on the pedals.',
                 walk:'Not rising? Steepen the hill, speed up, and pump your arms.',
@@ -672,6 +720,7 @@ function settingsHTML(){
 function workoutHTML(){
   const m=PHASE[S.phase];
   return `
+  <div id="ceilWarn" style="display:none;background:#7A1010;color:#fff;border-radius:14px;padding:14px 18px;margin-bottom:12px;font-size:22px;font-weight:700;text-align:center">EASE OFF NOW. Your heart rate is very high.</div>
   <div id="phaseBanner" style="background:${m.hex}">
     <div class="num" id="phaseLabel" style="font-size:30px;font-weight:700;letter-spacing:.05em">${m.label}</div>
     <div style="text-align:right"><div id="roundLabel" style="font-size:18px;font-weight:700">Round ${S.round} of ${S.plan.rounds}</div><div id="sessClock" style="font-size:15px"></div></div>
@@ -697,6 +746,10 @@ function workoutHTML(){
   <div class="panel2" style="margin-bottom:16px;display:${S.rounds.length?'block':'none'}">
     <div class="lbl">Finished rounds</div>
     <div id="roundsList"></div>
+  </div>
+  <div style="display:flex;gap:12px;margin-bottom:12px">
+    <button class="ghost-btn" style="flex:1;font-weight:700;${S.paused?'background:var(--restBg);color:#fff;border-color:var(--restBg);':''}" onclick="togglePause()">${S.paused?'&#9654; Resume':'&#10074;&#10074; Pause'}</button>
+    <button class="ghost-btn" style="flex:1" onclick="toggleVoice()">${S.voiceOn?'&#128266; Voice on':'&#128263; Voice off'}</button>
   </div>
   <button class="ghost-btn" onclick="endWorkout()">Stop here and save</button>`;
 }
