@@ -98,7 +98,7 @@ const S = {
   plan:null, planReason:'', showAdjust:false, showDetails:false, modality:'bike',
   inputMode:'manual',
   hr:74, phase:'push', round:1, phaseStart:0, phaseTime:0, peak:0, sessionStart:0, timeCapped:false,
-  paused:false, pausedAt:0, voiceOn:true, lastCeilingWarn:0,
+  paused:false, pausedAt:0, voiceOn:true, lastCeilingWarn:0, breathLevel:1, breathTaught:false,
   rounds:[], completed:false, sessions:[], btStatus:'', lastSummary:null, pendingSession:null,
 };
 const PHASE = {
@@ -218,14 +218,15 @@ function loadAll(){
   S.sessions.forEach(x=>{ if(x.roundsDone==null && x.rounds) x.roundsDone=x.rounds.length; });
   const prof = load('pg-profile',null);
   if(prof){ Object.assign(S,{name:prof.name||'', age:prof.age, sex:prof.sex, restHR:prof.restHR, activity:prof.activity,
-    overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0, modality:prof.modality||'bike'});
+    overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0, modality:prof.modality||'bike',
+    breathLevel:prof.breathLevel!=null?prof.breathLevel:1, breathTaught:!!prof.breathTaught});
     S.onboarded = !!(prof.onboarded || (prof.name && prof.activity)); }
   const pl = load('pg-plan',null);
   if(pl){ S.plan=pl.plan; S.planReason=pl.reason||''; }
 }
 function persist(){
   store('pg-sessions',S.sessions);
-  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
+  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
     overrideMax:S.overrideMax,manualMax:S.manualMax,observedMax:S.observedMax});
   if(S.plan) store('pg-plan',{plan:S.plan,reason:S.planReason});
 }
@@ -286,13 +287,25 @@ async function connectBT(){
 
 /* ================= engine ================= */
 let tickId=null, simId=null, curRound={};
+function recoverLine(){
+  if(!S.breathTaught){
+    S.breathTaught=true; persist();
+    return 'Well done. Slow right down and let your heart settle to '+recoverCeil()+'. '
+      +'Now recovery breathing. First: two quick sniffs in through your nose, then one long sigh out through your mouth. Do that three times. '
+      +'Then breathe in through your nose, and out slowly through pursed lips, like blowing out a candle. '
+      +'When breathing feels easier, close your mouth and use only your nose. If you ever gasp, open your mouth for the exhale. That is the release valve, not a failure.';
+  }
+  const soft=['Nose in, long slow breath out.','Breathe low and slow. Nose if you can.','Long exhales. Let your heart follow your breath.'];
+  const nudge = S.breathLevel<3 ? ' If it feels easy, try one breathing level higher.' : '';
+  return 'Slow down and settle to '+recoverCeil()+'. '+soft[Math.floor(Math.random()*soft.length)]+nudge;
+}
 function advance(to){
   beep(to==='hold'?1200 : to==='rest'?500 : 880);
   S.phase=to; S.phaseStart=Date.now(); S.phaseTime=0;
   const lines={
     push:'Push. Work hard until your heart reaches '+gateFloor()+'.',
     hold:'Hold this effort for '+S.plan.hold+' seconds.',
-    recover:'Well done. Slow right down and let your heart settle to '+recoverCeil()+'.',
+    recover:recoverLine(),
     rest:'Rest easy. Next round soon.'};
   say(lines[to]);
   paintPhase();
@@ -348,6 +361,7 @@ function tick(){
     advance('recover');
   } else if(p==='recover' && h<=recoverCeil()){
     curRound.recover=+S.phaseTime.toFixed(1);
+    curRound.breath=S.breathLevel;
     S.rounds.push(curRound);
     if(S.round>=S.plan.rounds){ S.completed=true; endWorkout(); return; }
     advance('rest'); paintRounds();
@@ -369,6 +383,7 @@ function endWorkout(){
     gate:gateFloor(), ceil:recoverCeil(),
     plan:{zone:S.plan.zone,hold:S.plan.hold,rounds:S.plan.rounds},
     modality:S.modality, completed:S.completed, capped:S.timeCapped, rounds:done, roundsDone:done.length, peak:Math.round(S.peak),
+    breath:+(done.reduce((a,r)=>a+(r.breath!=null?r.breath:S.breathLevel),0)/done.length).toFixed(1),
     avgPush:+avgPush.toFixed(1), avgRecover:+avgRec.toFixed(1),
     fitness:+(avgPush/avgRec).toFixed(3),
   };
@@ -441,13 +456,14 @@ function paintPhase(){
     S.phase==='hold' ? 'Hold this effort' :
     S.phase==='recover' ? 'Slow down until your heart drops to '+recoverCeil() : 'Easy movement';
   el('tip').textContent=m.tip;
+  const bp=document.getElementById('breathPanel'); if(bp) bp.style.display = S.phase==='recover' ? 'block':'none';
 }
 function paintRounds(){
   const el=document.getElementById('roundsList');
   if(!el) return;
   el.parentElement.style.display = S.rounds.length? 'block':'none';
   el.innerHTML = S.rounds.map(r=>
-    '<div class="sumRow">Round '+r.round+': <b style="color:var(--push)">'+r.push+'s</b> up &middot; <b style="color:var(--rest)">'+r.recover+'s</b> down</div>'
+    '<div class="sumRow">Round '+r.round+': <b style="color:var(--push)">'+r.push+'s</b> up &middot; <b style="color:var(--rest)">'+r.recover+'s</b> down'+(r.breath!=null?' &middot; breath L'+r.breath:'')+'</div>'
   ).join('');
 }
 window.nudgeHR=d=>{ S.hr=Math.max(50,Math.min(maxHR()+12,S.hr+d)); updateLive(); };
@@ -545,6 +561,7 @@ window.setHold=v=>{S.plan.hold=(S.plan.zone===5?15:v); persist(); render();};
 window.setRounds=v=>{S.plan.rounds=v; persist(); render();};
 window.setMode=v=>{S.inputMode=v; render();};
 window.setModality=v=>{S.modality=v; persist(); render();};
+window.setBreath=v=>{S.breathLevel=v; persist(); render();};
 window.toggleOverride=()=>{S.overrideMax=!S.overrideMax; render();};
 window.setManualMax=v=>{S.manualMax=+v; refreshEst();};
 window.toggleAdjust=()=>{S.showAdjust=!S.showAdjust; render();};
@@ -743,6 +760,12 @@ function workoutHTML(){
       <button class="stepBtn" onclick="nudgeHR(5)" aria-label="Raise heart rate by 5">+</button>
     </div>
   </div>`:''}
+  <div class="panel" id="breathPanel" style="display:none">
+    <div class="lbl">Your breathing right now</div>
+    ${!S.breathTaught||S.sessions.length===0?`<div style="font-size:17px;margin-bottom:10px">Start with <b>two quick sniffs in the nose, one long sigh out the mouth</b>, three times. Then climb this ladder as far as today allows. Gasping? Open your mouth for the exhale and step back down. The mouth is the release valve, never a failure.</div>`:''}
+    ${segHTML([0,1,2,3], S.breathLevel, 'setBreath', ['0','1','2','3'])}
+    <div class="note">0: sniffs in, sigh out the mouth &middot; 1: nose in, slow blow out the lips &middot; 2: nose in and out &middot; 3: mouth closed the whole time</div>
+  </div>
   <div class="panel2" style="margin-bottom:16px;display:${S.rounds.length?'block':'none'}">
     <div class="lbl">Finished rounds</div>
     <div id="roundsList"></div>
