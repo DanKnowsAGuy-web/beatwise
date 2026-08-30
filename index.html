@@ -161,9 +161,9 @@ function planText(p){ return 'Zone '+p.zone+' &middot; '+p.hold+'-second holds &
    Earned: +1 minute per 3 completed sessions not rated very hard. */
 function sessionLimit(){
   let base = S.activity==='high'?12 : S.activity==='med'?10 : 8;
-  if(S.age>=75) base-=1;
-  if(S.restHR>=75) base-=1;
-  base=Math.max(8,base);
+  if(S.age>=70) base-=2; else if(S.age>=60) base-=1;
+  if(S.restHR>=75) base-=2;
+  base=Math.max(5,base);
   const good=S.sessions.filter(x=>x.completed && x.rpe!=='hard').length;
   return Math.min(15, base + Math.floor(good/3));
 }
@@ -213,6 +213,7 @@ function store(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){
 function load(k,d){ try{ const v=localStorage.getItem(k); return v!=null? JSON.parse(v):d; }catch(e){ return (k in mem)? mem[k]:d; } }
 function loadAll(){
   S.sessions = load('pg-sessions',[]);
+  S.sessions.forEach(x=>{ if(x.roundsDone==null && x.rounds) x.roundsDone=x.rounds.length; });
   const prof = load('pg-profile',null);
   if(prof){ Object.assign(S,{name:prof.name||'', age:prof.age, sex:prof.sex, restHR:prof.restHR, activity:prof.activity,
     overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0});
@@ -319,7 +320,7 @@ function endWorkout(){
     date:new Date().toISOString(), maxHR:maxHR(), restHR:S.restHR,
     gate:gateFloor(), ceil:recoverCeil(),
     plan:{zone:S.plan.zone,hold:S.plan.hold,rounds:S.plan.rounds},
-    completed:S.completed, capped:S.timeCapped, rounds:done, peak:Math.round(S.peak),
+    completed:S.completed, capped:S.timeCapped, rounds:done, roundsDone:done.length, peak:Math.round(S.peak),
     avgPush:+avgPush.toFixed(1), avgRecover:+avgRec.toFixed(1),
     fitness:+(avgPush/avgRec).toFixed(3),
   };
@@ -813,6 +814,11 @@ function dashHTML(){
       <div class="panel">
         <div class="lbl">Fitness score <span style="color:var(--hold)">&#9632;</span></div>
         ${trendSVG(['fitness'], ['#8A5A00'], 160)}
+      </div>
+      <div class="panel">
+        <div class="lbl">Rounds per session <span style="color:var(--recover)">&#9632;</span></div>
+        ${trendSVG(['roundsDone'], ['#155E8F'], 160)}
+        <div class="note">More rounds inside the same time limit means your heart is rising and recovering faster. A quiet but honest fitness signal.</div>
       </div>
       <button class="ghost-btn" onclick="exportData()">Download a backup of my history</button>`;
   }
