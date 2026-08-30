@@ -495,7 +495,15 @@ function paintPhase(){
     S.phase==='hold' ? 'Hold this effort' :
     S.phase==='recover' ? 'Slow down until your heart drops to '+recoverCeil() : 'Easy movement';
   el('tip').textContent=m.tip;
-  const bp=document.getElementById('breathPanel'); if(bp) bp.style.display = S.phase==='recover' ? 'block':'none';
+  const rb=document.getElementById('reachedBtn'), mp=document.getElementById('manualPanel');
+  if(rb&&mp){
+    const gatePhase = S.phase==='push'||S.phase==='recover';
+    mp.style.display = gatePhase?'block':'none';
+    rb.textContent = S.phase==='push' ? 'I reached '+gateFloor() : 'I am down to '+recoverCeil();
+    rb.style.background = S.phase==='push' ? 'var(--pushBg)' : 'var(--restBg)';
+  }
+  const bp=document.getElementById('breathPanel');
+  if(bp){ bp.style.display = S.phase==='recover' ? 'block':'none'; if(S.phase==='recover') paintBreath(); }
 }
 function paintRounds(){
   const el=document.getElementById('roundsList');
@@ -506,6 +514,51 @@ function paintRounds(){
   ).join('');
 }
 window.nudgeHR=d=>{ S.hr=Math.max(50,Math.min(maxHR()+12,S.hr+d)); updateLive(); };
+/* Manual mode: the user tells the app when the gate is met, no slider needed. */
+window.manualReached=()=>{
+  if(S.inputMode!=='manual') return;
+  if(S.phase==='push'){ S.hr=gateFloor(); }
+  else if(S.phase==='recover'){ S.hr=recoverCeil(); }
+};
+window.manualUndo=()=>{
+  if(S.phase==='hold'){ S.hr=Math.round(recoverCeil()+ (gateFloor()-recoverCeil())*0.6); curRound={}; advance('push'); }
+  else if(S.phase==='rest'){ S.hr=gateFloor(); S.rounds.pop(); paintRounds(); advance('recover'); }
+};
+
+/* ================= breathing coach ================= */
+const BREATH=[
+  {name:'Sighs',  in:'2 quick sniffs IN through the nose', out:'1 long sigh OUT through the mouth',
+   cue:'Sniff, sniff... aahhh. Three times.', inN:true, outN:false},
+  {name:'Pursed', in:'IN through the nose', out:'OUT slowly through pursed lips',
+   cue:'Blow out like you are cooling soup. Make the out twice as long as the in.', inN:true, outN:false},
+  {name:'Nasal',  in:'IN through the nose', out:'OUT through the nose',
+   cue:'Mouth closed. Small, quiet, slow.', inN:true, outN:true},
+  {name:'Full nasal', in:'IN through the nose', out:'OUT through the nose',
+   cue:'Mouth stays closed the whole way. Light and easy.', inN:true, outN:true},
+];
+window.stepBreath=d=>{
+  const n=Math.max(0,Math.min(3,S.breathLevel+d));
+  if(n===S.breathLevel) return;
+  S.breathLevel=n; persist();
+  say(BREATH[n].cue);
+  paintBreath();
+};
+function paintBreath(){
+  const box=document.getElementById('breathBox'); if(!box) return;
+  const L=S.breathLevel, b=BREATH[L];
+  const dot=(on)=>on?'<span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:var(--rest);vertical-align:-2px"></span>'
+                    :'<span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:var(--push);vertical-align:-2px"></span>';
+  const pips=[0,1,2,3].map(i=>'<span style="display:inline-block;width:34px;height:8px;border-radius:4px;margin-right:5px;background:'+(i<=L?'var(--recover)':'#DCD5C7')+'"></span>').join('');
+  box.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:baseline">'
+      +'<div style="font-size:22px;font-weight:700">Breathing: '+b.name+'</div>'
+      +'<div class="note" style="margin:0">Level '+L+' of 3</div></div>'
+    +'<div style="margin:8px 0 12px">'+pips+'</div>'
+    +'<div style="font-size:22px;font-weight:700;line-height:1.35">'+dot(b.inN)+' '+b.in+'</div>'
+    +'<div style="font-size:22px;font-weight:700;line-height:1.35;margin-top:6px">'+dot(b.outN)+' '+b.out+'</div>'
+    +'<div class="note" style="font-size:17px">'+b.cue+'</div>'
+    +'<div class="note">Gasping? Tap Easier. The mouth is a release valve, never a failure.</div>';
+}
 
 /* ================= zone ladder ================= */
 function ladderSVG(){
@@ -807,11 +860,11 @@ function workoutHTML(){
     </div>
   </div>`:''}
   <div class="panel" id="breathPanel" style="display:none">
-    <div class="lbl">Your breathing right now</div>
-    ${!S.breathTaught||S.sessions.length===0?`<div style="font-size:17px;margin-bottom:10px">Start with <b>two quick sniffs in the nose, one long sigh out the mouth</b>, three times. Then climb this ladder as far as today allows. Gasping? Open your mouth for the exhale and step back down. The mouth is the release valve, never a failure.</div>`:''}
-    ${segHTML([0,1,2,3], S.breathLevel, 'setBreath', ['0','1','2','3'])}
-    <div class="note">0: sniffs in, sigh out the mouth &middot; 1: nose in, slow blow out the lips &middot; 2: nose in and out &middot; 3: mouth closed the whole time</div>
-    ${lastCP()?`<div class="note" style="color:var(--recover);font-weight:700">Your breath score of ${lastCP().seconds}s suggests level ${cpSuggest(lastCP().seconds)}.</div>`:''}
+    <div id="breathBox"></div>
+    <div style="display:flex;gap:10px;margin-top:12px">
+      <button class="stepBtn" style="flex:1;font-size:20px;font-weight:700" onclick="stepBreath(-1)">&#9660; Easier</button>
+      <button class="stepBtn" style="flex:1;font-size:20px;font-weight:700" onclick="stepBreath(1)">Harder &#9650;</button>
+    </div>
   </div>
   <div class="panel2" style="margin-bottom:16px;display:${S.rounds.length?'block':'none'}">
     <div class="lbl">Finished rounds</div>
