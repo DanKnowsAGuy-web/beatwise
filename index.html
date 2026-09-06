@@ -106,6 +106,7 @@ const S = {
   rounds:[], completed:false, sessions:[], btStatus:'', lastSummary:null, pendingSession:null,
   cps:[], cpPhase:'intro', cpStart:0, cpSeconds:0, cpResult:null,
   recoverPct:0.60, btDevice:null, lastBt:0, btLost:false, share:false, deviceId:'',
+  btRaw:[], btContact:null, btBattery:null, btSteady:false, btSteadyStart:0, btDeviceName:'',
 };
 const PHASE = {
   push:   {label:'PUSH',    hex:'#C0392B', tip:'Work as hard as you comfortably can'},
@@ -318,7 +319,7 @@ function loadAll(){
   const prof = load('pg-profile',null);
   if(prof){ Object.assign(S,{name:prof.name||'', age:prof.age, sex:prof.sex, restHR:prof.restHR, activity:prof.activity,
     overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0, modality:prof.modality||'bike',
-    recoverPct:prof.recoverPct||0.60, share:!!prof.share, deviceId:prof.deviceId||'',
+    recoverPct:prof.recoverPct||0.60, share:!!prof.share, deviceId:prof.deviceId||'', btDeviceName:prof.btDeviceName||'',
     breathLevel:prof.breathLevel!=null?prof.breathLevel:1, breathTaught:!!prof.breathTaught});
     S.onboarded = !!(prof.onboarded || (prof.name && prof.activity)); }
   const pl = load('pg-plan',null);
@@ -327,12 +328,13 @@ function loadAll(){
 function persist(){
   store('pg-sessions',S.sessions);
   store('pg-cp',S.cps);
-  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,share:S.share,deviceId:S.deviceId,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
+  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,share:S.share,deviceId:S.deviceId,btDeviceName:S.btDeviceName,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
     overrideMax:S.overrideMax,manualMax:S.manualMax,observedMax:S.observedMax});
   if(S.plan) store('pg-plan',{plan:S.plan,reason:S.planReason});
 }
 loadAll();
 setTimeout(teleFlush, 2000);
+setTimeout(autoReconnect, 800);
 
 /* ================= wake lock (keep the screen on during workouts) ================= */
 let wakeLock=null;
@@ -378,28 +380,73 @@ window.copyLink=async()=>{
 async function connectBT(){
   S.btStatus='Requesting device...'; render();
   try{
-    const dev = await navigator.bluetooth.requestDevice({filters:[{services:['heart_rate']}]});
-    S.btDevice=dev;
-    dev.addEventListener('gattserverdisconnected', ()=>reconnectBT());
-    await attachHR(dev);
-    S.btStatus='Connected: '+(dev.name||'heart rate monitor'); S.inputMode='bluetooth';
+    const dev = await navigator.bluetooth.requestDevice({filters:[{services:['heart_rate']}], optionalServices:['battery_service']});
+    await useDevice(dev);
   }catch(e){
     S.btStatus = hasWebBT() ? 'No strap was chosen or it did not connect. Make sure the strap is on, wet, and not paired to another app.' : 'This browser cannot use Bluetooth. Use Chrome or Edge, or manual mode with any watch.';
   }
   render();
 }
+/* 5. Remembered device: where Chrome keeps Bluetooth permissions, reconnect without the picker */
+async function autoReconnect(){
+  if(!hasWebBT() || !navigator.bluetooth.getDevices || !S.btDeviceName) return;
+  try{
+    const devs = await navigator.bluetooth.getDevices();
+    const dev = devs.find(d=>d.name===S.btDeviceName);
+    if(!dev) return;
+    S.btStatus='Reconnecting to '+S.btDeviceName+'...'; render();
+    await new Promise(r=>{                      /* wait for the strap to advertise */
+      dev.addEventListener('advertisementreceived', ()=>r(), {once:true});
+      dev.watchAdvertisements().catch(()=>r());
+      setTimeout(r, 8000);
+    });
+    await useDevice(dev);
+  }catch(e){ S.btStatus=''; }
+  render();
+}
+async function useDevice(dev){
+  S.btDevice=dev; S.btDeviceName=dev.name||''; S.btRaw=[]; S.btSteady=false; S.btSteadyStart=0;
+  dev.addEventListener('gattserverdisconnected', ()=>reconnectBT());
+  await attachHR(dev);
+  S.btStatus='Connected: '+(dev.name||'heart rate monitor'); S.inputMode='bluetooth';
+  persist();
+}
 async function attachHR(dev){
-  const srv = await (await dev.gatt.connect()).getPrimaryService('heart_rate');
+  const server = await dev.gatt.connect();
+  const srv = await server.getPrimaryService('heart_rate');
   const ch = await srv.getCharacteristic('heart_rate_measurement');
   await ch.startNotifications();
   ch.addEventListener('characteristicvaluechanged', e=>{
     const v=e.target.value, flags=v.getUint8(0);
-    const hr=(flags & 1) ? v.getUint16(1,true) : v.getUint8(1);
-    if(hr>0){ S.hr=hr; S.lastBt=Date.now(); }
+    const raw=(flags & 1) ? v.getUint16(1,true) : v.getUint8(1);
+    /* 2. Skin contact: bits 1-2 of the flags. 0b10 = contact supported but not detected */
+    const contactSupported = !!(flags & 0x4), contact = !!(flags & 0x2);
+    S.btContact = contactSupported ? contact : null;
+    if(raw>0){
+      /* 3. Median of the last three readings rejects single-reading spikes */
+      S.btRaw.push(raw); if(S.btRaw.length>3) S.btRaw.shift();
+      const sorted=[...S.btRaw].sort((a,b)=>a-b);
+      S.hr = sorted[Math.floor(sorted.length/2)];
+      S.lastBt=Date.now();
+      /* 1. Steady signal: three readings within 8 bpm of each other */
+      const spread = sorted[sorted.length-1]-sorted[0];
+      if(S.btRaw.length===3 && spread<=8 && (S.btContact!==false)){
+        if(!S.btSteadyStart) S.btSteadyStart=Date.now();
+        if(!S.btSteady && Date.now()-S.btSteadyStart>=5000){ S.btSteady=true; if(S.screen==='setup') render(); }
+      } else { S.btSteadyStart=0; if(S.btSteady){ S.btSteady=false; if(S.screen==='setup') render(); } }
+    }
     if(S.btLost){ S.btLost=false; say('Strap signal is back.'); }
     if(S.screen==='workout') updateLive();
+    else if(S.screen==='setup'){ const el=document.getElementById('liveHR'); if(el) el.textContent=Math.round(S.hr); const c=document.getElementById('contactNote'); if(c) c.style.display = S.btContact===false?'block':'none'; }
   });
   S.lastBt=Date.now();
+  /* 4. Battery level, best effort */
+  try{
+    const bs = await server.getPrimaryService('battery_service');
+    const bc = await bs.getCharacteristic('battery_level');
+    const bv = await bc.readValue(); S.btBattery = bv.getUint8(0);
+    if(S.btBattery<=20) say('Your strap battery is low, about '+S.btBattery+' percent.');
+  }catch(e){ S.btBattery=null; }
 }
 let btRetry=0;
 async function reconnectBT(){
@@ -476,7 +523,7 @@ function tick(){
   S.phaseTime = (Date.now()-S.phaseStart)/1000;
   if(S.inputMode==='bluetooth'){
     const stale = Date.now()-S.lastBt > 8000;
-    if(stale && !S.btLost){ S.btLost=true; say('No signal from your strap. Check it is snug and wet.'); }
+    if(stale && !S.btLost){ S.btLost=true; say(S.btContact===false ? 'Your strap is not touching skin. Wet the pads and snug it up.' : 'No signal from your strap. Check it is snug and wet.'); }
     if(!stale) S.peak=Math.max(S.peak, S.hr);
     if(stale) return;                      /* never gate on a stale number */
   }
@@ -946,7 +993,13 @@ function setupHTML(){
     ${S.inputMode==='manual'?'<div class="note">During the workout, glance at your watch and use the + and &minus; buttons to keep the number matched.</div>':''}
   </div>
 
-  <button class="big-btn" onclick="startWorkout()">Start the workout</button>
+  ${S.inputMode==='bluetooth'?`
+  <div class="panel" style="text-align:center">
+    <div class="lbl" style="margin:0">Strap signal: <span class="num" id="liveHR" style="font-size:44px;color:${S.btSteady?'var(--rest)':'var(--dim)'}">${Math.round(S.hr)}</span></div>
+    <div class="note" style="margin-top:4px">${S.btSteady?'Steady. You are good to go.':'Waiting for a steady reading... stand still a moment.'}${S.btBattery!=null?' &middot; Battery '+S.btBattery+'%':''}</div>
+    <div class="note" id="contactNote" style="display:${S.btContact===false?'block':'none'};color:var(--push);font-weight:700">Strap is not touching skin. Wet the pads and snug it up.</div>
+  </div>`:''}
+  <button class="big-btn" onclick="startWorkout()" ${S.inputMode==='bluetooth'&&!S.btSteady?'disabled':''}>${S.inputMode==='bluetooth'&&!S.btSteady?'Waiting for signal...':'Start the workout'}</button>
   <button class="link-btn" style="margin-top:10px" onclick="go('settings')">My details (age, resting heart rate)</button>`;
   return s;
 }
