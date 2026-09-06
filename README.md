@@ -28,3 +28,6 @@ BeatWise is a heart-rate-gated interval trainer designed for adults 65+. Instead
 
 ## Disclaimer
 BeatWise is a fitness tool, not a medical device. Users on heart medications (such as beta blockers) or with cardiac conditions should consult a doctor before high-intensity interval training.
+
+## Anonymous data collection
+The app can send one anonymous row per workout and per breath score to a Google Sheet you own. See `beatwise-collector.gs` for the 4-step setup, then paste the deployed web app URL into `TELEMETRY_URL` near the top of `index.html`. Users consent once at onboarding and can switch sharing off under My details. No names are ever sent, only a random device ID plus age, sex, activity level, and the session numbers.
