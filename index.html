@@ -367,6 +367,13 @@ function beep(f=880,d=0.18){
   }catch(e){}
 }
 
+/* ================= platform ================= */
+function isIOS(){ return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1); }
+function hasWebBT(){ return !!(navigator.bluetooth && navigator.bluetooth.requestDevice); }
+window.copyLink=async()=>{
+  try{ await navigator.clipboard.writeText(location.href); say('Link copied.'); }catch(e){ prompt('Copy this link:', location.href); }
+};
+
 /* ================= bluetooth ================= */
 async function connectBT(){
   S.btStatus='Requesting device...'; render();
@@ -377,7 +384,7 @@ async function connectBT(){
     await attachHR(dev);
     S.btStatus='Connected: '+(dev.name||'heart rate monitor'); S.inputMode='bluetooth';
   }catch(e){
-    S.btStatus='Bluetooth did not connect here. It needs Chrome or Edge. Manual mode works with any watch.';
+    S.btStatus = hasWebBT() ? 'No strap was chosen or it did not connect. Make sure the strap is on, wet, and not paired to another app.' : 'This browser cannot use Bluetooth. Use Chrome or Edge, or manual mode with any watch.';
   }
   render();
 }
@@ -924,7 +931,17 @@ function setupHTML(){
   <div class="panel">
     <div class="lbl">Where your heart rate comes from</div>
     ${segHTML(['manual','demo'], S.inputMode, 'setMode', ['My watch (I enter it)','Practice demo'])}
-    <button class="ghost-btn" style="margin-top:12px;color:var(--recover);font-weight:700" onclick="connectBT()">Connect a Bluetooth chest strap</button>
+    ${(isIOS() && !hasWebBT())?`
+    <div class="panel2" style="margin-top:12px">
+      <div style="font-weight:700;font-size:18px;margin-bottom:6px">Using a chest strap on iPhone</div>
+      <div style="font-size:17px;margin-bottom:10px">Safari cannot talk to heart rate straps. Open BeatWise in the free <b>Bluefy</b> browser instead and the strap connects normally.</div>
+      <div style="display:flex;gap:10px">
+        <a class="ghost-btn" style="flex:1;display:flex;align-items:center;justify-content:center;text-decoration:none;font-weight:700;color:var(--recover)" href="https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055" target="_blank" rel="noopener">1. Get Bluefy</a>
+        <button class="ghost-btn" style="flex:1;font-weight:700" onclick="copyLink()">2. Copy my link</button>
+      </div>
+      <div class="note">Paste the link into Bluefy and add it to your home screen from there. Or just use manual mode above, which works with any watch.</div>
+    </div>`
+    :`<button class="ghost-btn" style="margin-top:12px;color:var(--recover);font-weight:700" onclick="connectBT()">Connect a Bluetooth chest strap</button>`}
     ${S.btStatus?'<div class="note">'+S.btStatus+'</div>':''}
     ${S.inputMode==='manual'?'<div class="note">During the workout, glance at your watch and use the + and &minus; buttons to keep the number matched.</div>':''}
   </div>
