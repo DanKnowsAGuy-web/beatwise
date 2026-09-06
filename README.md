@@ -31,3 +31,6 @@ BeatWise is a fitness tool, not a medical device. Users on heart medications (su
 
 ## Anonymous data collection
 The app can send one anonymous row per workout and per breath score to a Google Sheet you own. See `beatwise-collector.gs` for the 4-step setup, then paste the deployed web app URL into `TELEMETRY_URL` near the top of `index.html`. Users consent once at onboarding and can switch sharing off under My details. No names are ever sent, only a random device ID plus age, sex, activity level, and the session numbers.
+
+## iPhone users
+Safari (and every browser on iOS) blocks Web Bluetooth. The app detects an iPhone and shows a card with two buttons: get the free Bluefy browser from the App Store, and copy the BeatWise link to paste into it. Inside Bluefy the chest strap connects normally. Manual mode works on any iPhone without extra apps.
