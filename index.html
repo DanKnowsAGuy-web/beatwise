@@ -89,6 +89,10 @@ button:focus-visible, input:focus-visible{outline:3px solid var(--recover); outl
 </div>
 
 <script>
+/* ================= anonymous data sharing ================= */
+const TELEMETRY_URL = '';   /* paste your Google Apps Script web app URL here */
+const APP_VERSION = '1.0';
+
 /* ================= state ================= */
 const S = {
   screen:'setup',
@@ -101,7 +105,7 @@ const S = {
   paused:false, pausedAt:0, voiceOn:true, lastCeilingWarn:0, breathLevel:1, breathTaught:false,
   rounds:[], completed:false, sessions:[], btStatus:'', lastSummary:null, pendingSession:null,
   cps:[], cpPhase:'intro', cpStart:0, cpSeconds:0, cpResult:null,
-  recoverPct:0.60, btDevice:null, lastBt:0, btLost:false,
+  recoverPct:0.60, btDevice:null, lastBt:0, btLost:false, share:false, deviceId:'',
 };
 const PHASE = {
   push:   {label:'PUSH',    hex:'#C0392B', tip:'Work as hard as you comfortably can'},
@@ -261,9 +265,47 @@ window.cpUrge=()=>{
   S.cps.push({date:new Date().toISOString(), seconds:sec});
   S.breathLevel=cpSuggest(sec);
   persist();
+  teleCP(sec);
   say('Your breath score is '+sec+' seconds. '+cpBand(sec)+'.');
   render();
 };
+
+/* ================= background sender (queued, retried, never blocks the user) ================= */
+function ensureDeviceId(){
+  if(!S.deviceId){
+    S.deviceId = (crypto.randomUUID ? crypto.randomUUID() : 'd-'+Date.now().toString(36)+Math.random().toString(36).slice(2,10));
+  }
+}
+function teleBase(type){
+  ensureDeviceId();
+  return {device:S.deviceId, type:type, date:new Date().toISOString().slice(0,10), app:APP_VERSION,
+          age:S.age, sex:S.sex, activity:S.activity, maxHR:maxHR(), restHR:S.restHR,
+          cp:(lastCP()? lastCP().seconds : ''), limit:sessionLimit(), recoverPct:S.recoverPct};
+}
+function teleSession(sess){
+  const row=Object.assign(teleBase('session'),{
+    modality:sess.modality, zone:sess.plan.zone, hold:sess.plan.hold, rounds_planned:sess.plan.rounds,
+    rounds_done:sess.roundsDone, completed:sess.completed?1:0, capped:sess.capped?1:0, rpe:sess.rpe,
+    avgPush:sess.avgPush, hrrRate:sess.hrrRate, avgRecover:sess.avgRecover, breath:sess.breath, peak:sess.peak});
+  teleQueue(row);
+}
+function teleCP(sec){ teleQueue(Object.assign(teleBase('breath_score'),{cp:sec})); }
+function teleQueue(row){
+  if(!S.share || !TELEMETRY_URL) return;
+  const q=load('pg-outbox',[]); q.push(row); store('pg-outbox',q);
+  teleFlush();
+}
+async function teleFlush(){
+  if(!S.share || !TELEMETRY_URL) return;
+  let q=load('pg-outbox',[]);
+  while(q.length){
+    try{
+      await fetch(TELEMETRY_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:JSON.stringify(q[0])});
+      q.shift(); store('pg-outbox',q);
+    }catch(e){ break; }   /* offline: keep the row, try again next time */
+  }
+}
+window.addEventListener('online', teleFlush);
 
 /* ================= persistence ================= */
 let mem={};
@@ -276,7 +318,7 @@ function loadAll(){
   const prof = load('pg-profile',null);
   if(prof){ Object.assign(S,{name:prof.name||'', age:prof.age, sex:prof.sex, restHR:prof.restHR, activity:prof.activity,
     overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0, modality:prof.modality||'bike',
-    recoverPct:prof.recoverPct||0.60,
+    recoverPct:prof.recoverPct||0.60, share:!!prof.share, deviceId:prof.deviceId||'',
     breathLevel:prof.breathLevel!=null?prof.breathLevel:1, breathTaught:!!prof.breathTaught});
     S.onboarded = !!(prof.onboarded || (prof.name && prof.activity)); }
   const pl = load('pg-plan',null);
@@ -285,11 +327,12 @@ function loadAll(){
 function persist(){
   store('pg-sessions',S.sessions);
   store('pg-cp',S.cps);
-  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
+  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,share:S.share,deviceId:S.deviceId,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
     overrideMax:S.overrideMax,manualMax:S.manualMax,observedMax:S.observedMax});
   if(S.plan) store('pg-plan',{plan:S.plan,reason:S.planReason});
 }
 loadAll();
+setTimeout(teleFlush, 2000);
 
 /* ================= wake lock (keep the screen on during workouts) ================= */
 let wakeLock=null;
@@ -498,6 +541,7 @@ function submitRPE(v){
   }
   S.planReason += adaptRecovery(sess);
   persist();
+  teleSession(sess);
   S.screen = isFirst ? 'findings' : 'summary';
   render();
 }
@@ -702,7 +746,7 @@ window.wAct=v=>{
   S.planReason='Chosen from your activity level. This first one is a measuring session: we are finding your starting line, not testing you.';
   obNext();
 };
-window.finishOnboarding=()=>{S.onboarded=true; persist(); go('setup');};
+window.finishOnboarding=(share)=>{S.onboarded=true; S.share=!!share; if(S.share) ensureDeviceId(); persist(); go('setup');};
 window.setZone=v=>{S.plan.zone=v; if(v===5)S.plan.hold=15; persist(); render();};
 window.setHold=v=>{S.plan.hold=(S.plan.zone===5?15:v); persist(); render();};
 window.setRounds=v=>{S.plan.rounds=v; persist(); render();};
@@ -786,7 +830,12 @@ function wizardHTML(){
     <div style="font-size:19px;margin-bottom:10px">Each round works like this: push until your heart reaches <b style="color:var(--push)">${gateFloor()}</b>, hold that effort ${S.plan.hold} seconds, then slow down until your heart settles to <b style="color:var(--rest)">${recoverCeil()}</b>, and rest easy. The app watches your heart and tells you when.</div>
     <div style="font-size:18px;margin-bottom:10px"><b>Good ways to do this:</b> a stationary bike, brisk uphill walking, or a rowing machine. Anything where you can quickly make the work harder or easier.</div>
     <div class="note" style="margin-bottom:14px">Heart medicines such as beta blockers lower these numbers. If you take one, or have a heart condition and do not exercise regularly, talk with your doctor before starting. You can change any answer later under &ldquo;My details&rdquo;.</div>
-    <button class="big-btn" onclick="finishOnboarding()">Show me my first workout</button>
+    <div class="panel2" style="margin-bottom:14px">
+      <div style="font-weight:700;font-size:19px;margin-bottom:6px">Help make BeatWise better</div>
+      <div style="font-size:17px">After each workout, the app quietly sends your workout numbers to the BeatWise team: your age, sex, heart rate results, and breathing scores. This helps the program improve for everyone. <b>Your name is never sent</b>, only a random ID. You can switch this off any time under My details.</div>
+    </div>
+    <button class="big-btn" onclick="finishOnboarding(true)">I agree, show me my first workout</button>
+    <button class="link-btn" style="margin-top:10px" onclick="finishOnboarding(false)">Continue without sharing</button>
     ${back}
   </div>`;
 }
@@ -821,6 +870,7 @@ function profilePanel(){
         <div><span class="num" id="recOut" style="font-size:32px;font-weight:700;color:var(--rest)">${recoverCeil()}</span> <span class="note" style="margin:0">recovered</span></div>
       </div>
       <div class="note">Heart medicines such as beta blockers lower these numbers. If you take one, or if you have a heart condition and do not exercise regularly, talk with your doctor before starting.</div>
+      <div class="note">Sharing anonymous workout data: <b>${S.share?'On':'Off'}</b>. <button class="link-btn" style="font-size:16px" onclick="S.share=!S.share;if(S.share)ensureDeviceId();persist();render()">${S.share?'Turn off':'Turn on'}</button> Your name is never sent, only a random ID.</div>
       <div class="note">Recovery target: ${recoverCeil()} (${Math.round(S.recoverPct*100)}% of your reserve). It adjusts itself from your sessions. <button class="link-btn" style="font-size:16px" onclick="S.recoverPct=0.60;persist();render()">Reset to default</button></div>
       ${S.observedMax?'<div class="note" style="color:var(--recover);font-weight:700">Your zones were adjusted upward because a session recorded '+S.observedMax+'. <button class="link-btn" onclick="clearCal()">Undo this adjustment</button></div>':''}
     </div>
