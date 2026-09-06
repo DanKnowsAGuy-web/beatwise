@@ -101,6 +101,7 @@ const S = {
   paused:false, pausedAt:0, voiceOn:true, lastCeilingWarn:0, breathLevel:1, breathTaught:false,
   rounds:[], completed:false, sessions:[], btStatus:'', lastSummary:null, pendingSession:null,
   cps:[], cpPhase:'intro', cpStart:0, cpSeconds:0, cpResult:null,
+  recoverPct:0.60, btDevice:null, lastBt:0, btLost:false,
 };
 const PHASE = {
   push:   {label:'PUSH',    hex:'#C0392B', tip:'Work as hard as you comfortably can'},
@@ -121,7 +122,24 @@ function estMax(){
 function maxHR(){ return S.overrideMax ? Math.max(S.manualMax, S.observedMax||0) : estMax(); }
 function bands(){ return [0.5,0.6,0.7,0.8,0.9,1.0].map(p=>Math.round(S.restHR + p*(maxHR()-S.restHR))); }
 function gateFloor(){ return bands()[S.plan.zone-1]; }
-function recoverCeil(){ return bands()[1]; } /* top of Zone 1 (60% of reserve): active recovery, as used in validated interval protocols */
+/* Recovery gate starts at the top of Zone 1 (60% of reserve) and adapts between 50% and 65%
+   from each session's data: deeper if fatigue stacks or recoveries are trivially quick,
+   shallower if recoveries eat the session. */
+function recoverCeil(){ return Math.round(S.restHR + S.recoverPct*(maxHR()-S.restHR)); }
+function adaptRecovery(sess){
+  const r=sess.rounds||[]; if(r.length<2) return '';
+  const first=r[0].bpm||0, last=r[r.length-1].bpm||0;
+  const stacking = first>0 && last/first < 0.7;
+  const trivial = sess.avgRecover < 20;
+  const slow = sess.avgRecover > 90;
+  const before=S.recoverPct;
+  if(stacking||trivial) S.recoverPct=Math.max(0.50, +(S.recoverPct-0.02).toFixed(2));
+  else if(slow) S.recoverPct=Math.min(0.65, +(S.recoverPct+0.02).toFixed(2));
+  if(S.recoverPct===before) return '';
+  return S.recoverPct<before
+    ? ' Your recovery target moved a little deeper, to '+recoverCeil()+', because '+(stacking?'fatigue was building round to round.':'recoveries were over almost instantly.')
+    : ' Your recovery target eased up a little, to '+recoverCeil()+', so more rounds fit inside your time limit.';
+}
 function fmt(s){ const m=Math.floor(s/60), r=Math.floor(s%60); return m>0? m+':'+String(r).padStart(2,'0') : r+'s'; }
 function greeting(){
   const h=new Date().getHours();
@@ -257,6 +275,7 @@ function loadAll(){
   const prof = load('pg-profile',null);
   if(prof){ Object.assign(S,{name:prof.name||'', age:prof.age, sex:prof.sex, restHR:prof.restHR, activity:prof.activity,
     overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0, modality:prof.modality||'bike',
+    recoverPct:prof.recoverPct||0.60,
     breathLevel:prof.breathLevel!=null?prof.breathLevel:1, breathTaught:!!prof.breathTaught});
     S.onboarded = !!(prof.onboarded || (prof.name && prof.activity)); }
   const pl = load('pg-plan',null);
@@ -265,7 +284,7 @@ function loadAll(){
 function persist(){
   store('pg-sessions',S.sessions);
   store('pg-cp',S.cps);
-  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
+  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
     overrideMax:S.overrideMax,manualMax:S.manualMax,observedMax:S.observedMax});
   if(S.plan) store('pg-plan',{plan:S.plan,reason:S.planReason});
 }
@@ -309,19 +328,37 @@ async function connectBT(){
   S.btStatus='Requesting device...'; render();
   try{
     const dev = await navigator.bluetooth.requestDevice({filters:[{services:['heart_rate']}]});
-    const srv = await (await dev.gatt.connect()).getPrimaryService('heart_rate');
-    const ch = await srv.getCharacteristic('heart_rate_measurement');
-    await ch.startNotifications();
-    ch.addEventListener('characteristicvaluechanged', e=>{
-      const v=e.target.value, flags=v.getUint8(0);
-      S.hr = (flags & 1) ? v.getUint16(1,true) : v.getUint8(1);
-      if(S.screen==='workout') updateLive();
-    });
+    S.btDevice=dev;
+    dev.addEventListener('gattserverdisconnected', ()=>reconnectBT());
+    await attachHR(dev);
     S.btStatus='Connected: '+(dev.name||'heart rate monitor'); S.inputMode='bluetooth';
   }catch(e){
     S.btStatus='Bluetooth did not connect here. It needs Chrome or Edge. Manual mode works with any watch.';
   }
   render();
+}
+async function attachHR(dev){
+  const srv = await (await dev.gatt.connect()).getPrimaryService('heart_rate');
+  const ch = await srv.getCharacteristic('heart_rate_measurement');
+  await ch.startNotifications();
+  ch.addEventListener('characteristicvaluechanged', e=>{
+    const v=e.target.value, flags=v.getUint8(0);
+    const hr=(flags & 1) ? v.getUint16(1,true) : v.getUint8(1);
+    if(hr>0){ S.hr=hr; S.lastBt=Date.now(); }
+    if(S.btLost){ S.btLost=false; say('Strap signal is back.'); }
+    if(S.screen==='workout') updateLive();
+  });
+  S.lastBt=Date.now();
+}
+let btRetry=0;
+async function reconnectBT(){
+  if(!S.btDevice) return;
+  S.btLost=true; updateLive();
+  for(btRetry=1; btRetry<=10; btRetry++){
+    try{ await attachHR(S.btDevice); S.btLost=false; updateLive(); return; }
+    catch(e){ await new Promise(r=>setTimeout(r,3000)); }
+  }
+  S.btStatus='Strap lost. Tap Connect to pair again.';
 }
 
 /* ================= engine ================= */
@@ -386,7 +423,12 @@ function tick(){
     S.timeCapped=true; endWorkout(); return;
   }
   S.phaseTime = (Date.now()-S.phaseStart)/1000;
-  if(S.inputMode==='bluetooth') S.peak=Math.max(S.peak, S.hr);
+  if(S.inputMode==='bluetooth'){
+    const stale = Date.now()-S.lastBt > 8000;
+    if(stale && !S.btLost){ S.btLost=true; say('No signal from your strap. Check it is snug and wet.'); }
+    if(!stale) S.peak=Math.max(S.peak, S.hr);
+    if(stale) return;                      /* never gate on a stale number */
+  }
   const h=S.hr, p=S.phase;
   if(h>=maxHR()+5 && Date.now()-S.lastCeilingWarn>20000){
     S.lastCeilingWarn=Date.now();
@@ -453,6 +495,7 @@ function submitRPE(v){
                           : stepPlan(sess.plan, dir);
     S.planReason=reason;
   }
+  S.planReason += adaptRecovery(sess);
   persist();
   S.screen = isFirst ? 'findings' : 'summary';
   render();
@@ -470,6 +513,7 @@ function updateLive(){
   const gated = S.phase==='push'||S.phase==='recover';
   const remaining = S.phase==='hold' ? Math.max(0,S.plan.hold-S.phaseTime)
                   : S.phase==='rest' ? Math.max(0,S.plan.hold*2-S.phaseTime) : S.phaseTime;
+  const bw=el('btWarn'); if(bw) bw.style.display = (S.inputMode==='bluetooth' && S.btLost)?'block':'none';
   el('bigTimer').textContent = S.paused? 'Paused' : fmt(gated? S.phaseTime : remaining);
   if(S.paused){ el('bigTimer').style.fontSize='54px'; } else { el('bigTimer').style.fontSize='96px'; }
   if(S.phase==='push' && S.phaseTime>90 && el('tip')){
@@ -776,6 +820,7 @@ function profilePanel(){
         <div><span class="num" id="recOut" style="font-size:32px;font-weight:700;color:var(--rest)">${recoverCeil()}</span> <span class="note" style="margin:0">recovered</span></div>
       </div>
       <div class="note">Heart medicines such as beta blockers lower these numbers. If you take one, or if you have a heart condition and do not exercise regularly, talk with your doctor before starting.</div>
+      <div class="note">Recovery target: ${recoverCeil()} (${Math.round(S.recoverPct*100)}% of your reserve). It adjusts itself from your sessions. <button class="link-btn" style="font-size:16px" onclick="S.recoverPct=0.60;persist();render()">Reset to default</button></div>
       ${S.observedMax?'<div class="note" style="color:var(--recover);font-weight:700">Your zones were adjusted upward because a session recorded '+S.observedMax+'. <button class="link-btn" onclick="clearCal()">Undo this adjustment</button></div>':''}
     </div>
     <div>
@@ -846,6 +891,7 @@ function settingsHTML(){
 function workoutHTML(){
   const m=PHASE[S.phase];
   return `
+  <div id="btWarn" style="display:none;background:#5A554C;color:#fff;border-radius:14px;padding:12px 18px;margin-bottom:12px;font-size:19px;font-weight:700;text-align:center">Strap signal lost. Reconnecting... Timers are on hold.</div>
   <div id="ceilWarn" style="display:none;background:#7A1010;color:#fff;border-radius:14px;padding:14px 18px;margin-bottom:12px;font-size:22px;font-weight:700;text-align:center">EASE OFF NOW. Your heart rate is very high.</div>
   <div id="phaseBanner" style="background:${m.hex}">
     <div class="num" id="phaseLabel" style="font-size:30px;font-weight:700;letter-spacing:.05em">${m.label}</div>
