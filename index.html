@@ -122,19 +122,20 @@ function estMax(){
 function maxHR(){ return S.overrideMax ? Math.max(S.manualMax, S.observedMax||0) : estMax(); }
 function bands(){ return [0.5,0.6,0.7,0.8,0.9,1.0].map(p=>Math.round(S.restHR + p*(maxHR()-S.restHR))); }
 function gateFloor(){ return bands()[S.plan.zone-1]; }
-/* Recovery gate starts at the top of Zone 1 (60% of reserve) and adapts between 50% and 65%
+/* Recovery gate starts at the top of Zone 1 (60% of reserve) and adapts between 50% and 60%
    from each session's data: deeper if fatigue stacks or recoveries are trivially quick,
    shallower if recoveries eat the session. */
 function recoverCeil(){ return Math.round(S.restHR + S.recoverPct*(maxHR()-S.restHR)); }
 function adaptRecovery(sess){
-  const r=sess.rounds||[]; if(r.length<2) return '';
+  const r=sess.rounds||[]; if(r.length<1) return '';
   const first=r[0].bpm||0, last=r[r.length-1].bpm||0;
   const stacking = first>0 && last/first < 0.7;
   const trivial = sess.avgRecover < 20;
-  const slow = sess.avgRecover > 90;
+  /* shallower only when long recoveries are actually costing rounds: session hit its cap with under 3 rounds */
+  const slow = sess.avgRecover > 90 && sess.capped && r.length < 3;
   const before=S.recoverPct;
   if(stacking||trivial) S.recoverPct=Math.max(0.50, +(S.recoverPct-0.02).toFixed(2));
-  else if(slow) S.recoverPct=Math.min(0.65, +(S.recoverPct+0.02).toFixed(2));
+  else if(slow) S.recoverPct=Math.min(0.60, +(S.recoverPct+0.02).toFixed(2));   /* never above the 60% start */
   if(S.recoverPct===before) return '';
   return S.recoverPct<before
     ? ' Your recovery target moved a little deeper, to '+recoverCeil()+', because '+(stacking?'fatigue was building round to round.':'recoveries were over almost instantly.')
