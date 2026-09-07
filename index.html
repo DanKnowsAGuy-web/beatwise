@@ -107,6 +107,7 @@ const S = {
   cps:[], cpPhase:'intro', cpStart:0, cpSeconds:0, cpResult:null,
   recoverPct:0.60, btDevice:null, lastBt:0, btLost:false, share:false, deviceId:'',
   btRaw:[], btContact:null, btBattery:null, btSteady:false, btSteadyStart:0, btDeviceName:'',
+  guided:false, voiceOnly:false, showHome:false, lastWeekly:'', preHRs:[], restDismissed:0, lastCue:'',
 };
 const PHASE = {
   push:   {label:'PUSH',    hex:'#C0392B', tip:'Work as hard as you comfortably can'},
@@ -116,7 +117,7 @@ const PHASE = {
 };
 const ZCOLORS = ['#7A8B9C','#4E9484','#B98F2E','#C86A2E','#B4271A'];
 const HOLD_STEPS=[15,20,30];
-const WEEKLY_GOAL=3;
+const WEEKLY_GOAL=2;   /* 1 is good, 2 is great, 3 is the max */
 
 /* Max HR: women Gulati 2010 (206 - 0.88 x age), men Tanaka 2001 (208 - 0.7 x age).
    Real observed peaks override the formula. Zones: Karvonen (heart rate reserve). */
@@ -308,6 +309,68 @@ async function teleFlush(){
 }
 window.addEventListener('online', teleFlush);
 
+/* ================= weeks ================= */
+function weekKey(d){ const x=new Date(d); const day=(x.getDay()+6)%7; x.setDate(x.getDate()-day); x.setHours(0,0,0,0); return x.toISOString().slice(0,10); }
+function weeksInARow(){
+  const keys=new Set(S.sessions.map(x=>weekKey(x.date)));
+  let n=0, cur=new Date();
+  if(!keys.has(weekKey(cur))) cur.setDate(cur.getDate()-7);
+  while(keys.has(weekKey(cur))){ n++; cur.setDate(cur.getDate()-7); }
+  return n;
+}
+function weeklyCardHTML(){
+  const now=new Date(), p1=new Date(now), p2=new Date(now); p1.setDate(p1.getDate()-7); p2.setDate(p2.getDate()-14);
+  const a=S.sessions.filter(x=>weekKey(x.date)===weekKey(p1)), b=S.sessions.filter(x=>weekKey(x.date)===weekKey(p2));
+  const n=a.length, lines=[];
+  lines.push(n===0 ? 'No workouts last week. One this week is all it takes.' : n+' workout'+(n>1?'s':'')+' last week. '+(n>=2?'Great.':'Good.'));
+  const ha=avgLast(a,hrrOf,9), hb=avgLast(b,hrrOf,9);
+  if(ha!=null && hb!=null){
+    const d=heartAgeFromHRR(hb)-heartAgeFromHRR(ha);
+    lines.push(d>0 ? 'Heart age down '+d+' year'+(d>1?'s':'')+'.' : d<0 ? 'Heart age wobbled up '+(-d)+'. Normal; keep going.' : 'Heart age steady.');
+  }
+  if(S.cps.length>=2){ const c=S.cps[S.cps.length-1].seconds-S.cps[S.cps.length-2].seconds; if(c) lines.push('Breath score '+(c>0?'up ':'down ')+Math.abs(c)+'s.'); }
+  const w=weeksInARow(); if(w>=2) lines.push(w+' weeks in a row.');
+  return `<div class="panel" style="border-color:var(--text)">
+    <div style="font-weight:700;font-size:20px;margin-bottom:6px">Your week in one glance</div>
+    <div style="font-size:18px">${lines.join(' ')}</div>
+    <button class="link-btn" onclick="S.lastWeekly=weekKey(new Date());persist();render()">Got it</button>
+  </div>`;
+}
+
+/* ================= resting HR self-tuning ================= */
+function restSuggestion(){
+  if(S.preHRs.length<3) return null;
+  const s=[...S.preHRs].sort((a,b)=>a-b), med=s[Math.floor(s.length/2)];
+  return (med<=S.restHR-5 && S.restDismissed!==med) ? med : null;
+}
+window.applyRest=v=>{ S.restHR=v; S.preHRs=[]; persist(); render(); };
+window.dismissRest=v=>{ S.restDismissed=v; persist(); render(); };
+
+/* ================= import (restore a backup) ================= */
+window.importData=(file)=>{
+  if(!file) return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    try{
+      const d=JSON.parse(rd.result);
+      const seen=new Set(S.sessions.map(x=>x.date));
+      (d.sessions||[]).forEach(x=>{ if(x&&x.date&&!seen.has(x.date)) S.sessions.push(x); });
+      S.sessions.sort((a,b)=>a.date.localeCompare(b.date));
+      S.sessions.forEach(x=>{ if(x.roundsDone==null && x.rounds) x.roundsDone=x.rounds.length; });
+      const seenC=new Set(S.cps.map(x=>x.date));
+      (d.cps||[]).forEach(x=>{ if(x&&x.date&&!seenC.has(x.date)) S.cps.push(x); });
+      S.cps.sort((a,b)=>a.date.localeCompare(b.date));
+      if(d.profile){
+        if(d.profile.restHR) S.restHR=d.profile.restHR;
+        if(d.profile.observedMax) S.observedMax=Math.max(S.observedMax||0, d.profile.observedMax);
+        if(!S.name && d.profile.name) S.name=d.profile.name;
+      }
+      persist(); say('History restored.'); render();
+    }catch(e){ alert('That file could not be read. It should be a BeatWise backup file.'); }
+  };
+  rd.readAsText(file);
+};
+
 /* ================= persistence ================= */
 let mem={};
 function store(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){ mem[k]=v; } }
@@ -320,6 +383,7 @@ function loadAll(){
   if(prof){ Object.assign(S,{name:prof.name||'', age:prof.age, sex:prof.sex, restHR:prof.restHR, activity:prof.activity,
     overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0, modality:prof.modality||'bike',
     recoverPct:prof.recoverPct||0.60, share:!!prof.share, deviceId:prof.deviceId||'', btDeviceName:prof.btDeviceName||'',
+    voiceOnly:!!prof.voiceOnly, lastWeekly:prof.lastWeekly||'', preHRs:prof.preHRs||[], restDismissed:prof.restDismissed||0,
     breathLevel:prof.breathLevel!=null?prof.breathLevel:1, breathTaught:!!prof.breathTaught});
     S.onboarded = !!(prof.onboarded || (prof.name && prof.activity)); }
   const pl = load('pg-plan',null);
@@ -328,7 +392,7 @@ function loadAll(){
 function persist(){
   store('pg-sessions',S.sessions);
   store('pg-cp',S.cps);
-  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,share:S.share,deviceId:S.deviceId,btDeviceName:S.btDeviceName,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
+  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,share:S.share,deviceId:S.deviceId,btDeviceName:S.btDeviceName,voiceOnly:S.voiceOnly,lastWeekly:S.lastWeekly,preHRs:S.preHRs,restDismissed:S.restDismissed,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
     overrideMax:S.overrideMax,manualMax:S.manualMax,observedMax:S.observedMax});
   if(S.plan) store('pg-plan',{plan:S.plan,reason:S.planReason});
 }
@@ -476,6 +540,13 @@ function recoverLine(){
 function advance(to){
   beep(to==='hold'?1200 : to==='rest'?500 : 880);
   S.phase=to; S.phaseStart=Date.now(); S.phaseTime=0;
+  S.lastCue='';
+  if(S.guided){
+    const g={hold:'You reached it. Now hold this same effort while the countdown runs.',
+             recover:'Now recover. Slow right down, breathe through your nose, and let your heart settle to '+recoverCeil()+'. The timer waits for that.',
+             rest:'Rest easy. In a real workout the next push would start after this.'};
+    say(g[to]||''); paintPhase(); return;
+  }
   const lines={
     push:'Push. Work hard until your heart reaches '+gateFloor()+'.',
     hold:'Hold this effort for '+S.plan.hold+' seconds.',
@@ -484,14 +555,17 @@ function advance(to){
   say(lines[to]);
   paintPhase();
 }
-function startWorkout(){
+function startWorkout(guided){
+  S.guided=!!guided;
+  if(!S.guided && S.inputMode==='bluetooth' && S.btSteady){ S.preHRs.push(Math.round(S.hr)); if(S.preHRs.length>5) S.preHRs.shift(); }
   persist();
   S.rounds=[]; S.round=1; S.phase='push'; S.phaseStart=Date.now(); S.phaseTime=0;
   S.peak=0; S.completed=false; S.sessionStart=Date.now(); S.timeCapped=false;
   if(S.inputMode==='demo') S.hr=74;
   S.paused=false;
   S.screen='workout'; beep(880); keepAwake();
-  say('Round 1. Push until your heart reaches '+gateFloor()+'.');
+  S.lastCue='';
+  say(S.guided ? 'Practice round. Nothing is scored. This is the push: work hard, and the timer waits for your heart, not the clock. Go until you reach '+gateFloor()+'.' : 'Round 1. Push until your heart reaches '+gateFloor()+'.');
   render();
   clearInterval(tickId); tickId=setInterval(tick,150);
   clearInterval(simId);
@@ -528,6 +602,11 @@ function tick(){
     if(stale) return;                      /* never gate on a stale number */
   }
   const h=S.hr, p=S.phase;
+  const rem = p==='hold' ? S.plan.hold-S.phaseTime : p==='rest' ? S.plan.hold*2-S.phaseTime : null;
+  if(rem!=null){ const rr=Math.ceil(rem); if((rr===10||rr===5) && S.lastCue!==p+rr){ S.lastCue=p+rr; say(rr===10?'Ten seconds.':'Five.'); } }
+  if(S.voiceOnly && S.inputMode==='bluetooth' && (p==='push'||p==='recover')){
+    const t=Math.floor(S.phaseTime); if(t>0 && t%20===0 && S.lastCue!==p+t){ S.lastCue=p+t; say(String(Math.round(h))); }
+  }
   if(h>=maxHR()+5 && Date.now()-S.lastCeilingWarn>20000){
     S.lastCeilingWarn=Date.now();
     beep(300,0.5); say('Ease off now. Your heart rate is very high. Slow down.');
@@ -544,6 +623,7 @@ function tick(){
     /* beats shed per minute: the HRR-style metric, robust to how deep the gate sits */
     curRound.bpm=+((gateFloor()-recoverCeil())*60/Math.max(S.phaseTime,1)).toFixed(0);
     S.rounds.push(curRound);
+    if(S.guided){ endGuided(); return; }
     if(S.round>=S.plan.rounds){ S.completed=true; endWorkout(); return; }
     advance('rest'); paintRounds();
   } else if(p==='rest' && S.phaseTime>=S.plan.hold*2){
@@ -551,7 +631,13 @@ function tick(){
   }
   updateLive();
 }
+function endGuided(){
+  clearInterval(tickId); clearInterval(simId); releaseWake();
+  say('That is the whole rhythm. Push, hold, recover, rest. You are ready.');
+  S.screen='guidedDone'; render();
+}
 function endWorkout(){
+  if(S.guided){ endGuided(); return; }
   clearInterval(tickId); clearInterval(simId); releaseWake();
   try{speechSynthesis.cancel();}catch(e){}
   const done=S.rounds.filter(r=>r.recover!=null);
@@ -614,7 +700,7 @@ function updateLive(){
                   : S.phase==='rest' ? Math.max(0,S.plan.hold*2-S.phaseTime) : S.phaseTime;
   const bw=el('btWarn'); if(bw) bw.style.display = (S.inputMode==='bluetooth' && S.btLost)?'block':'none';
   el('bigTimer').textContent = S.paused? 'Paused' : fmt(gated? S.phaseTime : remaining);
-  if(S.paused){ el('bigTimer').style.fontSize='54px'; } else { el('bigTimer').style.fontSize='96px'; }
+  if(S.paused){ el('bigTimer').style.fontSize='54px'; } else { el('bigTimer').style.fontSize=S.voiceOnly?'120px':'96px'; }
   if(S.phase==='push' && S.phaseTime>90 && el('tip')){
     const cues={bike:'Not rising? Add resistance, pedal faster, or stand on the pedals.',
                 walk:'Not rising? Steepen the hill, speed up, and pump your arms.',
@@ -765,7 +851,7 @@ function trendSVG(keys, colors, height, dataset){
 
 /* ================= export ================= */
 function exportData(){
-  const blob=new Blob([JSON.stringify({profile:{name:S.name,age:S.age,sex:S.sex,restHR:S.restHR,observedMax:S.observedMax},sessions:S.sessions},null,2)],{type:'application/json'});
+  const blob=new Blob([JSON.stringify({profile:{name:S.name,age:S.age,sex:S.sex,restHR:S.restHR,observedMax:S.observedMax},sessions:S.sessions,cps:S.cps},null,2)],{type:'application/json'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
   a.download='beatwise-history.json';
@@ -811,6 +897,8 @@ window.toggleOverride=()=>{S.overrideMax=!S.overrideMax; render();};
 window.setManualMax=v=>{S.manualMax=+v; refreshEst();};
 window.toggleAdjust=()=>{S.showAdjust=!S.showAdjust; render();};
 window.toggleDetails=()=>{S.showDetails=!S.showDetails; render();};
+window.toggleHome=()=>{S.showHome=!S.showHome; render();};
+window.togglePocket=()=>{S.voiceOnly=!S.voiceOnly; persist(); render();};
 window.clearCal=()=>{S.observedMax=0; persist(); render();};
 function refreshEst(){
   const el=id=>document.getElementById(id);
@@ -940,67 +1028,74 @@ function profilePanel(){
 
 function setupHTML(){
   const firstTime = S.sessions.length===0;
+  if(!S.plan){ S.plan=firstPlan(S.activity||'med'); S.planReason='Your starting plan.'; persist(); }
+  const names={bike:'Bike',walk:'Uphill walk',row:'Rowing'};
+  const wk=weekCount();
   let s = `<h1 class="screen">${greeting()}</h1>`;
 
-  if(!S.plan){ S.plan=firstPlan(S.activity||'med'); S.planReason='Your starting plan.'; persist(); }
-  if(!firstTime){
-    s += `<div class="panel2" style="margin-bottom:16px;font-size:18px">${goalSentence()}</div>`;
-    if(cpDue()){
-      s += `<div class="panel" style="display:flex;align-items:center;gap:12px">
-        <div style="flex:1"><div style="font-weight:700;font-size:19px">Weekly breath check</div>
-        <div class="note">One minute, before you warm up. Your score sets this week&rsquo;s breathing level.</div></div>
-        <button class="ghost-btn" style="width:auto;padding:12px 18px;font-weight:700;color:var(--recover)" onclick="startCPTest()">Take it</button>
-      </div>`;
-    }
-  }
+  if(!firstTime && S.lastWeekly!==weekKey(new Date())) s+=weeklyCardHTML();
 
-  s+=`
-  <div class="planCard">
-    <div style="font-weight:700;font-size:20px;margin-bottom:6px">${firstTime?'Your first workout':'Today&rsquo;s workout'}</div>
-    <div class="num" style="font-size:30px;font-weight:700">${planText(S.plan)}</div>
-    <div class="note" style="font-size:17px">${S.planReason}</div>
-    <div class="note">Session limit: <b>${sessionLimit()} minutes</b>. Finish more sessions and it grows, up to 15.</div>
-    <div class="note">How it works: work hard until your heart reaches <b style="color:var(--push)">${gateFloor()}</b>, hold for ${S.plan.hold} seconds, then slow down until it settles to <b style="color:var(--rest)">${recoverCeil()}</b> and rest ${S.plan.hold*2} seconds. That is one round.</div>
-    <button class="link-btn" onclick="toggleAdjust()">${S.showAdjust?'Hide adjustments':'Change today&rsquo;s plan myself'}</button>
-    ${S.showAdjust?`
-      <div style="display:grid;gap:14px;margin-top:10px">
-        <div><div class="lbl">Zone to reach</div>${segHTML([3,4,5], S.plan.zone, 'setZone', ['Zone 3','Zone 4','Zone 5'])}</div>
-        <div><div class="lbl">Hold time</div>${segHTML([15,20,30], S.plan.hold, 'setHold', ['15 sec','20 sec','30 sec'])}${S.plan.zone===5?'<div class="note">At Zone 5, holds stay at 15 seconds. That high, research supports only short surges.</div>':''}</div>
-        <div><div class="lbl">Rounds</div>${segHTML([3,4,5,6,8], S.plan.rounds, 'setRounds')}</div>
-      </div>`:''}
-  </div>
+  const rs=restSuggestion();
+  if(rs) s+=`<div class="panel2" style="margin-bottom:16px;font-size:17px">Before your last few workouts your strap read about <b>${rs}</b>, lower than the resting heart rate you entered (${S.restHR}). Updating it sharpens your zones.
+    <div style="display:flex;gap:10px;margin-top:10px"><button class="ghost-btn" style="flex:1;font-weight:700;color:var(--rest)" onclick="applyRest(${rs})">Update to ${rs}</button><button class="ghost-btn" style="flex:1" onclick="dismissRest(${rs})">Keep ${S.restHR}</button></div></div>`;
 
-  <div class="panel">
-    <div class="lbl">Today&rsquo;s exercise</div>
-    ${segHTML(['bike','walk','row'], S.modality, 'setModality', ['Bike','Uphill walk','Rowing'])}
-  </div>
+  s+=`<div class="planCard">
+    <div style="font-weight:700;font-size:20px;margin-bottom:6px">${firstTime?'Your first workout':'Today'}</div>
+    <div class="num" style="font-size:30px;font-weight:700">${names[S.modality]||'Bike'} &middot; Zone ${S.plan.zone} &middot; ${S.plan.rounds} rounds</div>
+    <div class="note">${S.plan.hold}-second holds &middot; up to ${sessionLimit()} minutes${wk>=3?' &middot; <b>Three done this week, the max. Rest is where the gains happen.</b>':''}</div>
+    ${firstTime?`<div class="note" style="font-size:17px">${S.planReason}</div>`:''}
+  </div>`;
 
-  <div class="panel">
-    <div class="lbl">Where your heart rate comes from</div>
-    ${segHTML(['manual','demo'], S.inputMode, 'setMode', ['My watch (I enter it)','Practice demo'])}
-    ${(isIOS() && !hasWebBT())?`
-    <div class="panel2" style="margin-top:12px">
-      <div style="font-weight:700;font-size:18px;margin-bottom:6px">Using a chest strap on iPhone</div>
-      <div style="font-size:17px;margin-bottom:10px">Safari cannot talk to heart rate straps. Open BeatWise in the free <b>Bluefy</b> browser instead and the strap connects normally.</div>
-      <div style="display:flex;gap:10px">
-        <a class="ghost-btn" style="flex:1;display:flex;align-items:center;justify-content:center;text-decoration:none;font-weight:700;color:var(--recover)" href="https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055" target="_blank" rel="noopener">1. Get Bluefy</a>
-        <button class="ghost-btn" style="flex:1;font-weight:700" onclick="copyLink()">2. Copy my link</button>
-      </div>
-      <div class="note">Paste the link into Bluefy and add it to your home screen from there. Or just use manual mode above, which works with any watch.</div>
-    </div>`
-    :`<button class="ghost-btn" style="margin-top:12px;color:var(--recover);font-weight:700" onclick="connectBT()">Connect a Bluetooth chest strap</button>`}
-    ${S.btStatus?'<div class="note">'+S.btStatus+'</div>':''}
-    ${S.inputMode==='manual'?'<div class="note">During the workout, glance at your watch and use the + and &minus; buttons to keep the number matched.</div>':''}
-  </div>
-
-  ${S.inputMode==='bluetooth'?`
+  if(S.inputMode==='bluetooth') s+=`
   <div class="panel" style="text-align:center">
     <div class="lbl" style="margin:0">Strap signal: <span class="num" id="liveHR" style="font-size:44px;color:${S.btSteady?'var(--rest)':'var(--dim)'}">${Math.round(S.hr)}</span></div>
     <div class="note" style="margin-top:4px">${S.btSteady?'Steady. You are good to go.':'Waiting for a steady reading... stand still a moment.'}${S.btBattery!=null?' &middot; Battery '+S.btBattery+'%':''}</div>
     <div class="note" id="contactNote" style="display:${S.btContact===false?'block':'none'};color:var(--push);font-weight:700">Strap is not touching skin. Wet the pads and snug it up.</div>
-  </div>`:''}
-  <button class="big-btn" onclick="startWorkout()" ${S.inputMode==='bluetooth'&&!S.btSteady?'disabled':''}>${S.inputMode==='bluetooth'&&!S.btSteady?'Waiting for signal...':'Start the workout'}</button>
-  <button class="link-btn" style="margin-top:10px" onclick="go('settings')">My details (age, resting heart rate)</button>`;
+  </div>`;
+
+  s+=`<button class="big-btn" onclick="startWorkout(false)" ${S.inputMode==='bluetooth'&&!S.btSteady?'disabled':''}>${S.inputMode==='bluetooth'&&!S.btSteady?'Waiting for signal...':'Start'}</button>`;
+  if(firstTime) s+=`<button class="ghost-btn" style="margin-top:10px;font-weight:700" onclick="startWorkout(true)">Try one practice round first (about 2 minutes)</button>`;
+  if(!firstTime && cpDue()) s+=`<button class="link-btn" style="margin-top:10px" onclick="startCPTest()">Weekly breath check is due &middot; take it (1 minute)</button>`;
+  s+=`<button class="link-btn" style="margin-top:6px" onclick="toggleHome()">${S.showHome?'Hide details':'Exercise, heart rate source, plan, settings'}</button>`;
+
+  if(S.showHome){
+    s+=`
+    ${!firstTime?`<div class="panel2" style="margin-bottom:16px;font-size:17px">${S.planReason} ${goalSentence()}</div>`:''}
+    <div class="panel">
+      <div class="lbl">Exercise</div>
+      ${segHTML(['bike','walk','row'], S.modality, 'setModality', ['Bike','Uphill walk','Rowing'])}
+    </div>
+    <div class="panel">
+      <div class="lbl">Where your heart rate comes from</div>
+      ${segHTML(['manual','demo'], S.inputMode==='bluetooth'?'':S.inputMode, 'setMode', ['My watch (I tap)','Practice demo'])}
+      ${(isIOS() && !hasWebBT())?`
+      <div class="panel2" style="margin-top:12px">
+        <div style="font-weight:700;font-size:18px;margin-bottom:6px">Using a chest strap on iPhone</div>
+        <div style="font-size:17px;margin-bottom:10px">Safari cannot talk to heart rate straps. Open BeatWise in the free <b>Bluefy</b> browser instead and the strap connects normally.</div>
+        <div style="display:flex;gap:10px">
+          <a class="ghost-btn" style="flex:1;display:flex;align-items:center;justify-content:center;text-decoration:none;font-weight:700;color:var(--recover)" href="https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055" target="_blank" rel="noopener">1. Get Bluefy</a>
+          <button class="ghost-btn" style="flex:1;font-weight:700" onclick="copyLink()">2. Copy my link</button>
+        </div>
+        <div class="note">Paste the link into Bluefy and add it to your home screen from there. Or use manual mode, which works with any watch.</div>
+      </div>`
+      :`<button class="ghost-btn" style="margin-top:12px;color:var(--recover);font-weight:700" onclick="connectBT()">${S.inputMode==='bluetooth'?'Strap connected. Pair a different one':'Connect a Bluetooth chest strap'}</button>`}
+      ${S.btStatus?'<div class="note">'+S.btStatus+'</div>':''}
+    </div>
+    <div class="panel">
+      <div class="lbl">Pocket mode (voice only)</div>
+      <div class="note" style="margin:0 0 10px">Phone in your pocket, every instruction spoken, one big button. Good on the bike.</div>
+      <button class="ghost-btn" style="font-weight:700;${S.voiceOnly?'background:var(--text);color:#fff;':''}" onclick="togglePocket()">${S.voiceOnly?'Pocket mode is on':'Turn pocket mode on'}</button>
+    </div>
+    <div class="panel">
+      <div class="lbl">Change today&rsquo;s plan</div>
+      <div style="display:grid;gap:14px">
+        <div><div class="lbl">Zone to reach</div>${segHTML([3,4,5], S.plan.zone, 'setZone', ['Zone 3','Zone 4','Zone 5'])}</div>
+        <div><div class="lbl">Hold time</div>${segHTML([15,20,30], S.plan.hold, 'setHold', ['15 sec','20 sec','30 sec'])}${S.plan.zone===5?'<div class="note">At Zone 5, holds stay at 15 seconds. That high, research supports only short surges.</div>':''}</div>
+        <div><div class="lbl">Rounds</div>${segHTML([3,4,5,6,8], S.plan.rounds, 'setRounds')}</div>
+      </div>
+    </div>
+    <button class="ghost-btn" onclick="go('settings')">My details (age, resting heart rate, data sharing)</button>`;
+  }
   return s;
 }
 
@@ -1010,6 +1105,7 @@ function settingsHTML(){
 }
 
 function workoutHTML(){
+  if(S.voiceOnly) return pocketHTML();
   const m=PHASE[S.phase];
   return `
   <div id="btWarn" style="display:none;background:#5A554C;color:#fff;border-radius:14px;padding:12px 18px;margin-bottom:12px;font-size:19px;font-weight:700;text-align:center">Strap signal lost. Reconnecting... Timers are on hold.</div>
@@ -1093,6 +1189,41 @@ function cptestHTML(){
   <button class="link-btn" style="margin-top:10px" onclick="go('setup')">Not today</button>`;
 }
 
+function guidedDoneHTML(){
+  const r=S.rounds[0]||{};
+  return `
+  <h1 class="screen">You have the rhythm${S.name?', '+S.name:''}</h1>
+  <div class="panel" style="font-size:18px">
+    <div class="sumRow">Push, hold, recover, rest. That is every round.</div>
+    <div class="sumRow">Your practice push took <b style="color:var(--push)">${r.push||'?'}s</b> and your recovery <b style="color:var(--rest)">${r.recover||'?'}s</b>. Nothing was scored.</div>
+    <div class="sumRow" style="border:none">In a real workout the app keeps count, talks you through each round, and measures how your heart changes.</div>
+  </div>
+  <button class="big-btn" onclick="startWorkout(false)">Start my first real workout</button>
+  <button class="link-btn" style="margin-top:10px" onclick="go('setup')">Later</button>`;
+}
+function pocketHTML(){
+  const m=PHASE[S.phase];
+  return `
+  <div id="btWarn" style="display:none;background:#5A554C;color:#fff;border-radius:14px;padding:12px 18px;margin-bottom:12px;font-size:19px;font-weight:700;text-align:center">Strap signal lost. Reconnecting... Timers are on hold.</div>
+  <div id="ceilWarn" style="display:none;background:#7A1010;color:#fff;border-radius:14px;padding:14px 18px;margin-bottom:12px;font-size:22px;font-weight:700;text-align:center">EASE OFF NOW. Your heart rate is very high.</div>
+  <div id="phaseBanner" style="background:${m.hex};flex-direction:column;padding:26px 18px">
+    <div class="num" id="phaseLabel" style="font-size:64px;font-weight:700;letter-spacing:.05em">${m.label}</div>
+    <div id="roundLabel" style="font-size:20px;font-weight:700">Round ${S.round} of ${S.plan.rounds}</div>
+    <div id="sessClock" style="font-size:16px"></div>
+  </div>
+  <div class="num" id="bigTimer" style="text-align:center;font-size:120px;line-height:1;margin:10px 0;color:${m.hex}">0s</div>
+  <div id="timerMode" style="display:none"></div><div id="instruction" style="display:none"></div><div id="tip" style="display:none"></div>
+  ${S.inputMode==='manual'?`
+  <div id="manualPanel" style="margin-bottom:14px">
+    <button class="big-btn" id="reachedBtn" style="min-height:170px;font-size:30px" onclick="manualReached()"></button>
+    <button class="ghost-btn" id="undoBtn" style="margin-top:10px;display:none;font-weight:700" onclick="manualUndo()">&#8630; Undo</button>
+  </div>`:''}
+  <div style="display:flex;gap:12px;margin-bottom:12px">
+    <button class="ghost-btn" style="flex:1;font-weight:700;min-height:72px;${S.paused?'background:var(--restBg);color:#fff;border-color:var(--restBg);':''}" onclick="togglePause()">${S.paused?'&#9654; Resume':'&#10074;&#10074; Pause'}</button>
+    <button class="ghost-btn" style="flex:1;min-height:72px" onclick="togglePocket()">Show full screen</button>
+  </div>
+  <button class="ghost-btn" onclick="endWorkout()">Stop here and save</button>`;
+}
 function rpeHTML(){
   return `
   <h1 class="screen">One question${S.name?', '+S.name:''}</h1>
@@ -1170,49 +1301,43 @@ function dashHTML(){
   const n=S.sessions.length;
   let s=`<h1 class="screen">Your progress${S.name?', '+S.name:''}</h1>`;
   if(n===0){
-    return s+'<div class="panel" style="border-style:dashed;text-align:center;color:var(--dim)">No workouts yet. Finish one and this page comes alive.</div>';
+    return s+'<div class="panel" style="border-style:dashed;text-align:center;color:var(--dim)">No workouts yet. Finish one and this page comes alive.</div>'
+      +`<div class="panel" style="text-align:center"><div class="note">Have a backup file from another phone?</div><label class="ghost-btn" style="display:block;margin-top:8px;font-weight:700;cursor:pointer">Restore my history<input type="file" accept=".json,application/json" style="display:none" onchange="importData(this.files[0])"></label></div>`;
   }
   const hrr=currentHRR(), exp=expectedHRR(S.age);
   const ha = hrr!=null? heartAgeFromHRR(hrr):null;
-  const wk=weekCount();
+  const wk=weekCount(), wir=weeksInARow();
   const focus=pickFocus();
 
-  /* HERO: heart age */
+  /* 1. hero */
   if(ha!=null){
     const younger = ha<S.age;
     s+=`<div class="hero">
       <div style="font-size:18px;color:var(--dim)">Your heart recovers like a typical</div>
       <div class="heroNum" style="color:${younger?'var(--rest)':'var(--push)'}">${ha}</div>
       <div style="font-size:20px;font-weight:700">year old&rsquo;s</div>
-      <div style="font-size:18px;margin-top:8px">${younger
-        ? 'That is <b>'+(S.age-ha)+' years younger</b> than your age. Wonderful.'
-        : 'Every session of this training is built to bring this number down.'}</div>
-      <div class="note">A friendly estimate from your recovery speed, not a medical measurement.</div>
+      <div style="font-size:18px;margin-top:8px">${younger ? 'That is <b>'+(S.age-ha)+' years younger</b> than your age.' : 'Every session is built to bring this number down.'}</div>
     </div>`;
   }
 
-  /* CELEBRATE + RING */
+  /* 2. this week */
   s+=`<div class="panel" style="display:flex;gap:14px;align-items:center">
     ${ringSVG(wk, WEEKLY_GOAL)}
     <div style="flex:1">
-      <div style="font-size:22px;font-weight:700">${wk>=WEEKLY_GOAL?'Week complete! &#127881;':'Showing up '+ String.fromCodePoint(0x2B06)}</div>
-      <div class="note" style="font-size:17px">${
-        focus.strength==='recovery' && hrr!=null
-        ? 'Your recovery speed of about '+hrr+' beats per minute is <b>better than typical for your age</b> (around '+exp+'). Worth celebrating.'
-        : 'Consistency is the single most powerful thing at any age, and the ring only cares that you showed up.'}</div>
+      <div style="font-size:22px;font-weight:700">${wk>=3?'Three this week. That is the max.':wk===2?'Two this week. Great.':wk===1?'One this week. Good.':'Nothing yet this week.'}</div>
+      <div class="note" style="font-size:17px">One is good, two is great, three is the max. Rest days are part of the training.</div>
+      ${wir>=2?'<div style="font-size:18px;font-weight:700;margin-top:6px;color:var(--rest)">'+wir+' weeks in a row</div>':''}
     </div>
   </div>`;
 
-  /* THEN vs NOW (after 3 sessions) */
+  /* 3. one insight */
   if(n>=4){
     const lowerBetter = focus.opportunity==='recovery';
     const key = lowerBetter? (x=>x.avgRecover) : (x=>x.avgPush);
     const base=avgFirst(S.sessions,key,3), cur=avgLast(S.sessions,key,3);
     const imp=pct(base,cur,lowerBetter);
     if(base!=null&&cur!=null){
-      const maxV=Math.max(base,cur);
-      const h1=Math.max(30,140*base/maxV), h2=Math.max(30,140*cur/maxV);
-      const good = imp>0;
+      const maxV=Math.max(base,cur), h1=Math.max(30,140*base/maxV), h2=Math.max(30,140*cur/maxV), good=imp>0;
       s+=`<div class="panel" style="text-align:center">
         <div style="font-size:22px;font-weight:700">${lowerBetter?'Calming down after effort':'Working before your heart gives in'}
           <span class="arrow" style="color:${good?'var(--rest)':'var(--dim)'}">${good?(lowerBetter?'&#11015;':'&#11014;'):''}</span></div>
@@ -1227,59 +1352,51 @@ function dashHTML(){
           : 'Holding steady. Sleep, heat, and caffeine all nudge these numbers day to day.'}</div>
       </div>`;
     }
+  } else if(focus.strength==='recovery' && hrr!=null){
+    s+=`<div class="panel" style="font-size:18px">Your recovery speed of about <b>${hrr}</b> beats per minute is <b>better than typical for your age</b> (around ${exp}). Worth celebrating.</div>`;
   } else {
-    s+=`<div class="panel" style="text-align:center;color:var(--dim)">
-      <div style="font-size:20px;font-weight:700;color:var(--text)">Your before-and-after unlocks after workout ${Math.min(4,n+1)>3?4:'number 4'}</div>
-      <div class="note">The first three sessions are your baseline. Everything after gets compared to them.</div>
-    </div>`;
+    s+=`<div class="panel" style="text-align:center;color:var(--dim)"><div style="font-size:19px;font-weight:700;color:var(--text)">Your before-and-after unlocks after workout 4</div><div class="note">The first three sessions are your baseline.</div></div>`;
   }
 
-  /* breath score */
-  const cp=lastCP();
-  if(cp){
-    s+=`<div class="panel">
+  /* 4. more */
+  s+=`<button class="link-btn" onclick="toggleDetails()">${S.showDetails?'Show less':'More: breath score, by exercise, charts, backup'}</button>`;
+  if(S.showDetails){
+    const cp=lastCP();
+    if(cp) s+=`<div class="panel">
       <div style="display:flex;align-items:baseline;gap:14px">
         <div class="num" style="font-size:52px;font-weight:700;color:var(--recover)">${cp.seconds}s</div>
         <div><div style="font-size:20px;font-weight:700">Breath score &middot; ${cpBand(cp.seconds)}</div>
-        <div class="note" style="margin:0">Calm CO2 tolerance. Rises 2 to 4 seconds a week with practice.</div></div>
+        <div class="note" style="margin:0">Rises 2 to 4 seconds a week with practice.</div></div>
       </div>
       ${S.cps.length>=2? trendSVG(['seconds'], ['#155E8F'], 150, S.cps) : ''}
       <button class="link-btn" onclick="startCPTest()">Test again</button>
     </div>`;
-  }
-  /* by exercise */
-  const ms=modalityStats();
-  if(ms){
-    const rises=[...ms].sort((a,b)=>a.push-b.push)[0];
-    const settles=[...ms].sort((a,b)=>a.rec-b.rec)[0];
-    s+=`<div class="panel">
-      <div style="font-size:22px;font-weight:700;margin-bottom:8px">By exercise</div>
-      ${ms.map(r=>'<div class="sumRow">'+r.label+': <b style="color:var(--push)">'+r.push+'s</b> to rise &middot; <b style="color:var(--rest)">'+r.rec+'s</b> to settle <span class="note" style="margin:0">('+r.n+' sessions)</span></div>').join('')}
-      <div style="font-size:18px;margin-top:10px">Your heart rises quickest on the <b>${rises.label.toLowerCase()}</b>${rises.m===settles.m?' and settles fastest there too.':' and settles fastest after the <b>'+settles.label.toLowerCase()+'</b>.'}</div>
-    </div>`;
-  }
-  /* details */
-  s+=`<button class="link-btn" onclick="toggleDetails()">${S.showDetails?'Hide the detailed charts':'See the detailed charts'}</button>`;
-  if(S.showDetails){
+    const ms=modalityStats();
+    if(ms){
+      const rises=[...ms].sort((a,b)=>a.push-b.push)[0], settles=[...ms].sort((a,b)=>a.rec-b.rec)[0];
+      s+=`<div class="panel">
+        <div style="font-size:22px;font-weight:700;margin-bottom:8px">By exercise</div>
+        ${ms.map(r=>'<div class="sumRow">'+r.label+': <b style="color:var(--push)">'+r.push+'s</b> to rise &middot; <b style="color:var(--rest)">'+r.rec+'s</b> to settle <span class="note" style="margin:0">('+r.n+' sessions)</span></div>').join('')}
+        <div style="font-size:18px;margin-top:10px">Your heart rises quickest on the <b>${rises.label.toLowerCase()}</b>${rises.m===settles.m?' and settles fastest there too.':' and settles fastest after the <b>'+settles.label.toLowerCase()+'</b>.'}</div>
+      </div>`;
+    }
     s+=`<div class="panel">
         <div class="lbl">Seconds to reach the zone <span style="color:var(--push)">&#9632;</span> and to recover <span style="color:var(--rest)">&#9632;</span></div>
         ${trendSVG(['avgPush','avgRecover'], ['#B4271A','#1B6E3F'], 230)}
       </div>
       <div class="panel">
-        <div class="lbl">Fitness score <span style="color:var(--hold)">&#9632;</span></div>
-        ${trendSVG(['fitness'], ['#8A5A00'], 160)}
-      </div>
-      <div class="panel">
         <div class="lbl">Beats shed per minute <span style="color:var(--rest)">&#9632;</span></div>
         ${trendSVG(['hrrRate'], ['#1B6E3F'], 160)}
-        <div class="note">How fast your heart sheds beats after effort. The cleanest single measure of cardiovascular recovery, and it rises as you get fitter.</div>
       </div>
       <div class="panel">
         <div class="lbl">Rounds per session <span style="color:var(--recover)">&#9632;</span></div>
         ${trendSVG(['roundsDone'], ['#155E8F'], 160)}
-        <div class="note">More rounds inside the same time limit means your heart is rising and recovering faster. A quiet but honest fitness signal.</div>
       </div>
-      <button class="ghost-btn" onclick="exportData()">Download a backup of my history</button>`;
+      <div class="note">${n} workout${n>1?'s':''} saved on this device</div>
+      <div style="display:flex;gap:10px;margin-top:12px">
+        <button class="ghost-btn" style="flex:1" onclick="exportData()">Download backup</button>
+        <label class="ghost-btn" style="flex:1;display:flex;align-items:center;justify-content:center;cursor:pointer">Restore backup<input type="file" accept=".json,application/json" style="display:none" onchange="importData(this.files[0])"></label>
+      </div>`;
   }
   return s;
 }
@@ -1295,6 +1412,7 @@ function render(){
               : route==='setup'? setupHTML()
               : route==='settings'? settingsHTML()
               : route==='workout'? workoutHTML()
+              : route==='guidedDone'? guidedDoneHTML()
               : route==='cptest'? cptestHTML()
               : route==='rpe'? rpeHTML()
               : route==='findings'? findingsHTML()
