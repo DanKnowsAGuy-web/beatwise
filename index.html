@@ -107,7 +107,7 @@ const S = {
   cps:[], cpPhase:'intro', cpStart:0, cpSeconds:0, cpResult:null,
   recoverPct:0.60, btDevice:null, lastBt:0, btLost:false, share:false, deviceId:'',
   btRaw:[], btContact:null, btBattery:null, btSteady:false, btSteadyStart:0, btDeviceName:'',
-  guided:false, voiceOnly:false, showHome:false, lastWeekly:'', preHRs:[], restDismissed:0, lastCue:'',
+  guided:false, voiceOnly:false, showHome:false, lastWeekly:'', preHRs:[], restDismissed:0, lastCue:'', voiceName:'', voiceRate:0.95,
 };
 const PHASE = {
   push:   {label:'PUSH',    hex:'#C0392B', tip:'Work as hard as you comfortably can'},
@@ -384,6 +384,7 @@ function loadAll(){
     overrideMax:!!prof.overrideMax, manualMax:prof.manualMax||170, observedMax:prof.observedMax||0, modality:prof.modality||'bike',
     recoverPct:prof.recoverPct||0.60, share:!!prof.share, deviceId:prof.deviceId||'', btDeviceName:prof.btDeviceName||'',
     voiceOnly:!!prof.voiceOnly, lastWeekly:prof.lastWeekly||'', preHRs:prof.preHRs||[], restDismissed:prof.restDismissed||0,
+    voiceName:prof.voiceName||'', voiceRate:prof.voiceRate||0.95,
     breathLevel:prof.breathLevel!=null?prof.breathLevel:1, breathTaught:!!prof.breathTaught});
     S.onboarded = !!(prof.onboarded || (prof.name && prof.activity)); }
   const pl = load('pg-plan',null);
@@ -392,7 +393,7 @@ function loadAll(){
 function persist(){
   store('pg-sessions',S.sessions);
   store('pg-cp',S.cps);
-  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,share:S.share,deviceId:S.deviceId,btDeviceName:S.btDeviceName,voiceOnly:S.voiceOnly,lastWeekly:S.lastWeekly,preHRs:S.preHRs,restDismissed:S.restDismissed,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
+  store('pg-profile',{name:S.name,onboarded:S.onboarded,modality:S.modality,recoverPct:S.recoverPct,share:S.share,deviceId:S.deviceId,btDeviceName:S.btDeviceName,voiceOnly:S.voiceOnly,lastWeekly:S.lastWeekly,preHRs:S.preHRs,restDismissed:S.restDismissed,voiceName:S.voiceName,voiceRate:S.voiceRate,breathLevel:S.breathLevel,breathTaught:S.breathTaught,age:S.age,sex:S.sex,restHR:S.restHR,activity:S.activity,
     overrideMax:S.overrideMax,manualMax:S.manualMax,observedMax:S.observedMax});
   if(S.plan) store('pg-plan',{plan:S.plan,reason:S.planReason});
 }
@@ -409,15 +410,41 @@ function releaseWake(){ try{ wakeLock && wakeLock.release(); wakeLock=null; }cat
 document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && S.screen==='workout') keepAwake(); });
 
 /* ================= voice coaching ================= */
+/* Voice quality: phones ship several voices and browsers default to a plain one.
+   Score the English voices and prefer the premium/neural ones; the user can override. */
+let voiceList=[];
+function loadVoices(){ try{ voiceList=speechSynthesis.getVoices().filter(v=>/^en/i.test(v.lang)); }catch(e){ voiceList=[]; } }
+try{ loadVoices(); speechSynthesis.onvoiceschanged=()=>{ loadVoices(); if(S.screen==='settings') render(); }; }catch(e){}
+function voiceScore(v){
+  const n=(v.name||'').toLowerCase();
+  let s=0;
+  if(/enhanced|premium|neural|natural|wavenet|studio/.test(n)) s+=40;
+  if(/google/.test(n)) s+=25;
+  if(/samantha|karen|moira|daniel|serena|allison|ava|zoe|tom|aaron/.test(n)) s+=15;   /* Apple's better voices */
+  if(/microsoft.*(aria|jenny|guy|sonia|libby|ryan|natasha)/.test(n) || /online|natural/.test(n)) s+=20;
+  if(/compact|espeak|eloquence|flo|reed|shelley|grandma|grandpa|bahh|bells|boing|bubbles|cellos|deranged|hysterical|organ|trinoids|whisper|zarvox|jester|junior|ralph|wobble/.test(n)) s-=60;
+  if(/^en-(us|gb|au|ie|za|ca)/i.test(v.lang)) s+=5;
+  if(v.localService) s+=3;
+  return s;
+}
+function pickVoice(){
+  if(!voiceList.length) loadVoices();
+  if(S.voiceName){ const v=voiceList.find(x=>x.name===S.voiceName); if(v) return v; }
+  return [...voiceList].sort((a,b)=>voiceScore(b)-voiceScore(a))[0]||null;
+}
 function say(text){
   if(!S.voiceOn) return;
   try{
     speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(text);
-    u.rate=0.95; u.volume=1;
+    const v=pickVoice(); if(v){ u.voice=v; u.lang=v.lang; }
+    u.rate=S.voiceRate||0.95; u.volume=1;
     speechSynthesis.speak(u);
   }catch(e){}
 }
+window.setVoice=name=>{ S.voiceName=name; persist(); render(); say('Push. Work hard until your heart reaches '+gateFloor()+'.'); };
+window.setVoiceRate=r=>{ S.voiceRate=+r; persist(); const el=document.getElementById('rateOut'); if(el) el.textContent=(S.voiceRate).toFixed(2)+'x'; };
+window.previewVoice=()=>{ say('Well done. Slow right down and let your heart settle to '+recoverCeil()+'.'); };
 window.toggleVoice=()=>{ S.voiceOn=!S.voiceOn; if(!S.voiceOn) try{speechSynthesis.cancel();}catch(e){} render(); };
 
 /* ================= audio ================= */
@@ -1099,8 +1126,25 @@ function setupHTML(){
   return s;
 }
 
+function voicePanel(){
+  if(!voiceList.length) loadVoices();
+  const best=pickVoice();
+  const sorted=[...voiceList].sort((a,b)=>voiceScore(b)-voiceScore(a)).slice(0,8);
+  return `<div class="panel">
+    <div class="lbl">Coaching voice</div>
+    ${sorted.length? `<div class="note" style="margin:0 0 10px">Using: <b>${best?best.name:'phone default'}</b>. Tap one to hear it.</div>
+    <div style="display:grid;gap:8px">
+      ${sorted.map(v=>`<button class="ghost-btn" style="text-align:left;padding:12px 14px;${best&&v.name===best.name?'border-color:var(--text);font-weight:700;':''}" onclick="setVoice(${JSON.stringify(v.name).replace(/"/g,'&quot;')})">${v.name.replace(/^Microsoft |^Google /,'')} <span class="note" style="margin:0">${v.lang}</span></button>`).join('')}
+    </div>
+    <button class="link-btn" onclick="setVoice('')">Let the app choose the best one</button>`
+    : `<div class="note" style="margin:0">Voices load when you first tap Preview.</div>`}
+    <div class="lbl" style="margin-top:14px">Speed: <span id="rateOut">${(S.voiceRate).toFixed(2)}x</span></div>
+    <input type="range" min="0.7" max="1.2" step="0.05" value="${S.voiceRate}" oninput="setVoiceRate(this.value)" aria-label="Voice speed">
+    <button class="ghost-btn" style="margin-top:8px;font-weight:700" onclick="previewVoice()">Preview</button>
+  </div>`;
+}
 function settingsHTML(){
-  return `<h1 class="screen">My details</h1>` + profilePanel()
+  return `<h1 class="screen">My details</h1>` + profilePanel() + voicePanel()
     + `<button class="ghost-btn" onclick="persist();go('setup')">Done</button>`;
 }
 
